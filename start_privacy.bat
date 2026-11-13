@@ -47,15 +47,15 @@ if not exist "!PS_HELPER!" (
 
 :: --- VERIFY FILES EXIST ----------------------------------------------------
 if not exist "%ROTATOR_SCRIPT%" (
-    echo [X] Rotator script not found: %ROTATOR_SCRIPT%
+    echo [X] Rotator script not found: !ROTATOR_SCRIPT!
     pause & exit /b 1
 )
 if not exist "%MAIN_SCRIPT%" (
-    echo [X] Main script not found: %MAIN_SCRIPT%
+    echo [X] Main script not found: !MAIN_SCRIPT!
     pause & exit /b 1
 )
 if not exist "%TOR_EXE%" (
-    echo [X] Tor binary not found: %TOR_EXE%
+    echo [X] Tor binary not found: !TOR_EXE!
     echo     Get the Tor Expert Bundle from torproject.org/download/tor and extract it into this folder.
     pause & exit /b 1
 )
@@ -109,9 +109,16 @@ if errorlevel 1 (
 echo.
 
 :: --- START ROTATOR API -----------------------------------------------------
+:: already running (like the one click start from the popup)? use that one and dont kill it later
+powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_HELPER!" -Port 8222 >nul 2>&1
+if not errorlevel 1 (
+    echo [OK] Rotator already running
+    goto rotator_ready
+)
 echo [*] Starting Tor IP Rotator API...
 cd /d "%BASE_DIR%"
 start "TorRotator" /B python "%ROTATOR_SCRIPT%"
+set "STARTED_ROTATOR=1"
 timeout /t 3 /nobreak >nul
 
 :: just check the port, /status goes through tor now and can take a while
@@ -122,6 +129,7 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 echo [OK] Rotator API ready on port 8222
+:rotator_ready
 echo.
 
 :: --- OPTIONAL: LAUNCH AN APP THROUGH THE PROXY ------------------------------
@@ -132,7 +140,8 @@ if "%~1"=="" (
     pause >nul
 ) else (
     echo [*] Starting Privacy Proxy Launcher - manual rotation mode...
-    python "%MAIN_SCRIPT%" --no-rotate %*
+    rem -- = everything after it goes to ur app, so app flags like --inspect dont confuse Script.py
+    python "%MAIN_SCRIPT%" --no-rotate -- %*
 )
 echo.
 
@@ -145,7 +154,7 @@ exit /b 0
 
 :stop_services
 :: /B processes have no window title so match by command line / path instead.
-:: only kills tor if this script started it
-powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -like 'python*' -and $_.CommandLine -like '*tor_rotator.py*') -or ('!STARTED_TOR!' -eq '1' -and $_.ExecutablePath -eq '!TOR_EXE!') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >nul 2>&1
+:: only kills tor + the rotator if this script started them
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ('!STARTED_ROTATOR!' -eq '1' -and $_.Name -like 'python*' -and $_.CommandLine -like '*tor_rotator.py*') -or ('!STARTED_TOR!' -eq '1' -and $_.ExecutablePath -eq '!TOR_EXE!') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >nul 2>&1
 del "!PS_HELPER!" >nul 2>&1
 exit /b

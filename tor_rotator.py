@@ -20,6 +20,7 @@ import random
 import re
 import socket
 import statistics
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -118,11 +119,13 @@ def slot_ports(ctrl, fresh=False, only=None):
                 raise TorError("ports_unavailable", "Tor couldn't open its per-site ports.", detail=str(e)) from e
 
 
-def controller():
+def controller(starting_ok=False):
+    """starting_ok: let this through while tor is still starting (turning bridges off has to work
+    even when a broken bridge setup is the reason tor never finishes starting)"""
     ctrl = Controller.from_port(port=TOR_CONTROL_PORT)
     ctrl.authenticate()  # cookie auth
     progress = re.search(r"PROGRESS=(\d+)", ctrl.get_info("status/bootstrap-phase", ""))
-    if progress and int(progress.group(1)) < 100:
+    if progress and int(progress.group(1)) < 100 and not starting_ok:
         ctrl.close()
         raise TorError("tor_starting", f"Tor is still starting ({progress.group(1)}%).")
     return ctrl
@@ -161,11 +164,22 @@ def status(q):
             "exit_country": country, "geoip": geoip, "bridges": bridges}
 
 
+def ports_now(q):
+    """just the open per site ports. the extension checks these every 30s so chrome never keeps
+    using closed ones (like when the popup closed before a new ip finished)"""
+    with controller() as ctrl:
+        return {"ports": slot_ports(ctrl)}
+
+
 def rotate(q):
     """scope=site: new circuit for just one site. scope=all: new circuits for every site."""
     slot, scope = q.slot(), q.scope()
     with controller() as ctrl:
-        old_ip = tor_trace(slot_ports(ctrl)[slot]).get("ip")
+        current = slot_ports(ctrl)
+        try:
+            old_ip = tor_trace(current[slot]).get("ip")
+        except Exception:
+            old_ip = None  # the old circuit is broken, prob why u want a new one. dont let it block that
         # no NEWNYM: fresh ports already = fresh circuits, and tor delays repeat NEWNYMs by up to
         # 10s which swapped the circuit AGAIN right after we reported the new ip. what the hell tor
         for _ in range(3):  # tor can randomly pick the same exit again, retry if so
@@ -243,27 +257,30 @@ def fastest(q):
     with controller() as ctrl:
         ports = slot_ports(ctrl)
         current = ctrl.get_conf("SocksPort", multiple=True)
+        keep = [v for v in current if _port(v) not in SLOT_PORTS]
         candidates = random.sample([p for p in SLOT_PORTS if p not in ports], 3)
         ctrl.set_conf("SocksPort", current + [f"127.0.0.1:{p}" for p in candidates])
-        warm_up(candidates)
+        new = list(ports)
 
         def speed(port):
             times = []
             for _ in range(3):
                 try:
                     times.append(ping_ms(port, host))
-                except TorError:
+                except (TorError, OSError):  # OSError = socket timeout, a slow circuit just loses
                     pass
             return statistics.median(times) if times else float("inf")
 
-        tried = [ports[slot]] + candidates
-        with ThreadPoolExecutor(len(tried)) as pool:
-            timing = dict(zip(tried, pool.map(speed, tried)))
-        best = min(timing, key=timing.get)
-        new = list(ports)
-        new[slot] = best
-        keep = [v for v in current if _port(v) not in SLOT_PORTS]
-        ctrl.set_conf("SocksPort", keep + [f"127.0.0.1:{p}" for p in new])  # drop the losers
+        try:
+            warm_up(candidates)
+            tried = [ports[slot]] + candidates
+            with ThreadPoolExecutor(len(tried)) as pool:
+                timing = dict(zip(tried, pool.map(speed, tried)))
+            best = min(timing, key=timing.get)
+            new[slot] = best
+        finally:
+            # drop the losers. if something broke, drop all 3 candidates so we're back to 16 ports
+            ctrl.set_conf("SocksPort", keep + [f"127.0.0.1:{p}" for p in new])
         if timing[best] == float("inf"):
             raise TorError("ping_failed", "None of the circuits answered. Try again in a moment.", 502)
         info = tor_trace(best)
@@ -291,6 +308,17 @@ def bridge_mode(ctrl):
     return lines[0].split()[0].replace("meek_lite", "meek") if lines else "off"
 
 
+def short_path(path):
+    """tor splits ClientTransportPlugin on spaces, so a tor folder in like "Program Files" breaks
+    it. windows still has the old 8.3 short names (no spaces) for that"""
+    if os.name != "nt" or " " not in str(path):
+        return path.as_posix()
+    import ctypes
+    buf = ctypes.create_unicode_buffer(32768)
+    n = ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, len(buf))
+    return Path(buf.value).as_posix() if 0 < n < len(buf) else path.as_posix()
+
+
 def bridge_lines(home, mode):
     """built in bridges straight from the tor bundle's pt_config.json, so they're always current."""
     pt = home / "tor" / "pluggable_transports"
@@ -302,7 +330,7 @@ def bridge_lines(home, mode):
     plugin = cfg.get("pluggableTransports", {}).get("snowflake" if mode == "snowflake" else "lyrebird")
     if not bridges or not plugin:
         raise TorError("no_bridges", f"Your Tor bundle has no built-in {mode} bridges.", 409)
-    plugin = plugin.replace("${pt_path}", pt.as_posix() + "/").split(" ", 1)[1]
+    plugin = plugin.replace("${pt_path}", short_path(pt) + "/").split(" ", 1)[1]
     return [("UseBridges", "1"), ("ClientTransportPlugin", plugin)] + [("Bridge", b) for b in bridges]
 
 
@@ -310,7 +338,7 @@ def set_bridges(q):
     """hide tor from ur isp: connect thru built in bridges instead of normal tor relays.
     saved to torguard-bridges.conf too so next time tor uses them from the very first connection."""
     mode, slot = q.bridges(), q.slot()
-    with controller() as ctrl:
+    with controller(starting_ok=True) as ctrl:
         home = tor_home(ctrl)
         conf = home / BRIDGES_FILE
         old = conf.read_text(encoding="utf-8") if conf.exists() else None
@@ -340,6 +368,9 @@ def set_bridges(q):
                     time.sleep(3)
             location = locate(ctrl, info)
         except Exception as e:
+            if mode == "off":  # off is the safe default, never put a bridge setup back
+                err = explain(e)
+                raise TorError("bridges_failed", "Bridges are off, but Tor isn't connected yet. Give it a minute.", err.status, err.detail) from e
             if old_lines:  # put back whatever worked before
                 ctrl.set_options(old_lines)
                 conf.write_text(old, encoding="utf-8")
@@ -402,7 +433,11 @@ class Query:
         return mode
 
 
-ROUTES = {"/status": status, "/rotate": rotate, "/ping": ping, "/exit": set_exit, "/fastest": fastest, "/bridges": set_bridges}
+ROUTES = {"/status": status, "/ports": ports_now, "/rotate": rotate, "/ping": ping, "/exit": set_exit, "/fastest": fastest, "/bridges": set_bridges}
+# the server answers requests in parallel, but these all read the port list / ExitNodes, change it
+# and write it back. two at once = one undoes the other (like the 30 min auto new ip landing in the
+# middle of ur exit country switch). so one at a time. ping only reads, it can skip the line
+CONFIG_LOCK = threading.Lock()
 
 
 class RotationHandler(BaseHTTPRequestHandler):
@@ -415,7 +450,12 @@ class RotationHandler(BaseHTTPRequestHandler):
         if not route:
             return self._send_json(404, {"status": "error", "code": "not_found", "message": "Not found"})
         try:
-            self._send_json(200, route(Query(url.query)))
+            if route is ping:
+                result = route(Query(url.query))
+            else:
+                with CONFIG_LOCK:
+                    result = route(Query(url.query))
+            self._send_json(200, result)
         except Exception as e:
             err = explain(e)
             if err.code == "internal":
@@ -436,6 +476,7 @@ if __name__ == "__main__":
     print(f"[+] Tor IP Rotator API starting on port {ROTATOR_PORT}")
     print("[+] Endpoints:")
     print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/status?slot=N       -> exit IP a site on slot N sees")
+    print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/ports              -> the per site ports that are open")
     print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/rotate?slot=N&scope=site|all -> new circuit(s)")
     print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/ping?port=P&host=H  -> round trip through that circuit")
     print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/exit?country=de|any -> only use exits in one country")

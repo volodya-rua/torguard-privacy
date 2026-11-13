@@ -37,7 +37,7 @@ it can do it only for incognito windows (default) or for everything. it starts O
 
 | level | what u get |
 |---|---|
-| **off** | no tor for that site at all, it sees ur real ip. for sites that block tor |
+| **off** | no tor for that site at all, it sees ur real ip. for sites that block tor. other sites cant embed stuff from it (videos, widgets), that would leak ur real ip on them |
 | **low** | tor + webrtc/dns leak protection + https. pages see ur real device stuff. least likely to get blocked |
 | **med** | also fakes the clock (UTC), language (en-US), cpu, memory, gpu and os version |
 | **high** | also adds noise to canvas / webgl / audio fingerprints (changes every load), inside web workers too. this is the default |
@@ -85,6 +85,7 @@ the rotator is a tiny local api on `127.0.0.1:8222`:
 
 ```
 /status?slot=N                 exit ip a site on slot N sees
+/ports                         the per site ports that are open (extension checks every 30s)
 /rotate?slot=N&scope=site|all  new circuit for one site or all of them
 /ping?port=P&host=H            round trip thru that circuit
 /exit?country=de|any           only use exits in one country

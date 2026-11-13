@@ -38,11 +38,15 @@
       h = Math.imul(h ^ (h >>> 15), 0x85ebca77);
       return (h ^ (h >>> 13)) >>> 0;
     };
-    // flip the lowest bit of one color channel in ~1 of 32 pixels (u cant see it but the hash changes)
+    // set the lowest bit of one color channel in ~1 of 32 pixels (u cant see it but the hash changes).
+    // SET not flip: flipping twice (read, put back, read again) would undo it and give the real hash
     const farblePixels = (data, x0, y0, width) => {
       for (let p = 0, n = data.length >> 2; p < n; p++) {
         const h = noise(Math.imul(x0 + (p % width), 73856093) ^ Math.imul(y0 + ((p / width) | 0), 19349663));
-        if ((h & 31) === 0) data[(p << 2) + ((h >>> 5) % 3)] ^= 1;
+        if ((h & 31) === 0) {
+          const i = (p << 2) + ((h >>> 5) % 3);
+          data[i] = (data[i] & 254) | ((h >>> 7) & 1);
+        }
       }
     };
 
@@ -50,6 +54,8 @@
     const setMeta = (fn, orig) => {
       Object.defineProperty(fn, 'name', { value: orig.name });
       Object.defineProperty(fn, 'length', { value: orig.length });
+      // made in the parent page but used in an iframe: has to have the iframe's Function.prototype
+      Object.setPrototypeOf(fn, Object.getPrototypeOf(orig));
       masked.set(fn, nativeToString.call(orig));
       return fn;
     };
@@ -147,18 +153,29 @@
       wrap(DP, 'toString', () => ({ toString() { return valid(this) ? `${datePart(this)} ${timePart(this)}` : 'Invalid Date'; } }).toString);
       wrap(DP, 'toDateString', () => ({ toDateString() { return valid(this) ? datePart(this) : 'Invalid Date'; } }).toDateString);
       wrap(DP, 'toTimeString', () => ({ toTimeString() { return valid(this) ? timePart(this) : 'Invalid Date'; } }).toTimeString);
+      // no locale, [] or one chrome doesnt have would fall back to ur real one, so those become en-US.
+      // and an explicit timeZone: undefined would beat a UTC default, so only a real zone counts
+      const OrigDTF = win.Intl.DateTimeFormat;
+      const loc = (l) => { try { return l == null || !OrigDTF.supportedLocalesOf(l).length ? 'en-US' : l; } catch { return l; } };
+      const utc = (options) => ({ ...options, timeZone: options?.timeZone ?? 'UTC' });
       for (const name of ['toLocaleString', 'toLocaleDateString', 'toLocaleTimeString']) {
-        wrap(DP, name, (orig) => ({ [name](locales, options) { return orig.call(this, locales ?? 'en-US', { timeZone: 'UTC', ...options }); } })[name]);
+        wrap(DP, name, (orig) => ({ [name](locales, options) { return orig.call(this, loc(locales), utc(options)); } })[name]);
       }
-      wrap(win.Number.prototype, 'toLocaleString', (orig) => ({ toLocaleString(locales, options) { return orig.call(this, locales ?? 'en-US', options); } }).toLocaleString);
+      for (const proto of [win.Number.prototype, win.BigInt?.prototype]) {
+        wrap(proto, 'toLocaleString', (orig) => ({ toLocaleString(locales, options) { return orig.call(this, loc(locales), options); } }).toLocaleString);
+      }
+      wrap(win.String.prototype, 'localeCompare', (orig) => ({ localeCompare(that, locales, options) { return orig.call(this, that, loc(locales), options); } }).localeCompare);
 
-      // strings with a zone ("Z", "+05:30", "GMT"...) keep it, local time strings become UTC
-      const HAS_ZONE = /(?:Z|[+-]\d{2}(?::?\d{2})?|\b(?:UTC|GMT|UT)\b.*)$/i;
+      // strings with a zone ("...10:00Z", "...10:00+05:30", "GMT", "PST"...) keep it, local time
+      // strings become UTC. a date-only ISO string ("2024", "2024-01-15") is UTC already by spec.
+      // the +hh:mm form only counts right after a time, or "01-15-2024" would look like zone -20:24
+      const HAS_ZONE = /(?:\d:\d\d(?::\d\d(?:\.\d+)?)?\s*(?:Z|[+-]\d{2}(?::?\d{2})?)|\b(?:UTC|GMT|UT|[ECMP][SD]T)\b.*)$/i;
+      const ISO_DAY = /^[+-]?\d{4,6}(?:-\d\d(?:-\d\d)?)?$/;
       const asUTC = (t) => t - realOffset.call(new OrigDate(t)) * 60000;
       const parse = setMeta({ parse(s) {
-        const str = String(s);
+        const str = String(s).trim();
         const t = OrigDate.parse(str);
-        return t !== t || HAS_ZONE.test(str.trim()) ? t : asUTC(t);
+        return t !== t || HAS_ZONE.test(str) || ISO_DAY.test(str) ? t : asUTC(t);
       } }.parse, OrigDate.parse);
       const FakeDate = function Date(...args) {
         if (!new.target) return DP.toString.call(new OrigDate());
@@ -175,7 +192,7 @@
         if (!Orig) continue;
         const withTz = name === 'DateTimeFormat';
         const Fake = function (locales, options) {
-          const args = [locales ?? 'en-US', withTz ? { timeZone: 'UTC', ...options } : options];
+          const args = [loc(locales), withTz ? utc(options) : options];
           return new.target ? Reflect.construct(Orig, args, new.target === Fake ? Orig : new.target) : Orig(...args);
         };
         replaceClass(win.Intl, name, Orig, Fake);
@@ -308,10 +325,23 @@
           const target = new.target === FakeWorker ? OrigWorker : new.target;
           let wrapper = null;
           try {
-            const script = new win.URL(url, win.document.baseURI);
-            if (workers() && script.origin === win.location.origin && /^https?:$/.test(script.protocol)) {
-              const load = options?.type === 'module' ? `await import(${JSON.stringify(script.href)});` : `importScripts(${JSON.stringify(script.href)});`;
-              const code = `(${SOURCE})(self, { high: true, workers: false, workerBase: ${JSON.stringify(script.href)} });\n${load}`;
+            // workers can start workers too (no document there, so resolve against the worker's url)
+            const script = new win.URL(url, win.document?.baseURI ?? win.location.href);
+            let load = null;
+            if (workers() && script.origin === win.location.origin) {
+              if (/^https?:$/.test(script.protocol)) {
+                load = options?.type === 'module' ? `await import(${JSON.stringify(script.href)});` : `importScripts(${JSON.stringify(script.href)});`;
+              } else if (script.protocol === 'blob:' && options?.type !== 'module') {
+                // blob: workers are the usual way to fingerprint off the main thread. the page often
+                // revokes the url right after new Worker(), so grab the code now and run it inline
+                const xhr = new win.XMLHttpRequest();
+                xhr.open('GET', script.href, false);
+                xhr.send();
+                if (xhr.status === 200) load = xhr.responseText;
+              }
+            }
+            if (load !== null) {
+              const code = `(${SOURCE})(self, { high: true, workers: () => true, workerBase: ${JSON.stringify(script.href)} });\n${load}`;
               wrapper = win.URL.createObjectURL(new win.Blob([code], { type: 'text/javascript' }));
               win.setTimeout(() => win.URL.revokeObjectURL(wrapper), 30000);
             }

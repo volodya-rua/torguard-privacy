@@ -15,20 +15,19 @@ importScripts('site.js', 'trackers.js');
 const ROTATOR_API = 'http://127.0.0.1:8222';
 const LEVELS = ['off', 'low', 'medium', 'high'];
 const AUTO_ROTATE_MINUTES = [0, 10, 30, 60];
-const TOR_FALLBACK = { mode: 'fixed_servers', rules: { singleProxy: { scheme: 'socks5', host: '127.0.0.1', port: 9050 } } };
-const PRIVATE_IP = '(10|127|192\\.168|172\\.(1[6-9]|2[0-9]|3[01]))\\.'; // local network ip ranges
+// local network http urls (router, nas...) for the https rule. a full ipv4 only, so 10.tv isnt one
+const PRIVATE_HTTP = '^http://(10|127|192\\.168|172\\.(1[6-9]|2[0-9]|3[01]))(\\.[0-9]{1,3}){2,3}(:[0-9]+)?(/|$)';
 
 // with the rotator ports every site gets its own tor circuit. 9050 is the fallback if a port
 // died (like tor restarted). only Off sites + ur own network go DIRECT so if tor dies nothing leaks
 function proxyConfig(ports, directSites) {
-  if (!ports.length && !directSites.length) return TOR_FALLBACK;
   const tor = ports.length
     ? `'SOCKS5 127.0.0.1:' + PORTS[siteSlot(host, PORTS.length)] + '; SOCKS5 127.0.0.1:9050'`
     : `'SOCKS5 127.0.0.1:9050'`;
-  const data = `${siteKey}\n${siteSlot}\nvar PORTS = ${JSON.stringify(ports)};
+  const data = `${siteKey}\n${siteSlot}\n${isLocal}\nvar PORTS = ${JSON.stringify(ports)};
 var DIRECT = ${JSON.stringify(Object.fromEntries(directSites.map((s) => [s, 1])))};
 function FindProxyForURL(url, host) {
-  if (host === 'localhost' || host === '::1' || host === '[::1]' || /^${PRIVATE_IP}/.test(host)) return 'DIRECT';
+  if (isLocal(host)) return 'DIRECT';
   if (DIRECT[siteKey(host)]) return 'DIRECT';
   return ${tor};
 }`;
@@ -52,7 +51,7 @@ const SCRIPT = { matches: ['<all_urls>'], runAt: 'document_start', allFrames: tr
 
 const ALL_TYPES = ['main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font', 'object', 'xmlhttprequest',
   'ping', 'csp_report', 'media', 'websocket', 'webtransport', 'webbundle', 'other'];
-const RULE = { HEADERS: 1, HTTPS: 2, LOCAL_HTTP: 3, TRACKERS: 4 };
+const RULE = { HEADERS: 1, HTTPS: 2, LOCAL_HTTP: 3, TRACKERS: 4, OFF_EMBEDS: 5 };
 const TRACKER_URL_RULES = TRACKER_URLS.map((urlFilter, i) => ({ id: 10 + i, urlFilter })); // ids 10+
 // medium + high: everyone says en-US and no detailed device/os/version hints
 const HEADER_ACTION = {
@@ -102,6 +101,9 @@ async function applySettings(state) {
   const target = enabled && (incognitoOnly ? 'incognito_persistent' : 'regular');
   const scopes = incognitoAllowed ? ['regular', 'incognito_persistent'] : ['regular'];
   const proxy = proxyConfig(ports, offSites(state));
+  // set the new scope before clearing the other one, or switching "incognito only" on leaves
+  // incognito tabs without tor for a moment
+  scopes.sort((a) => (a === target ? -1 : 1));
   for (const scope of scopes) {
     for (const [setting, value] of [[chrome.proxy.settings, proxy], ...PRIVACY]) {
       try {
@@ -114,19 +116,23 @@ async function applySettings(state) {
 }
 
 async function applyScripts(state) {
-  await chrome.scripting.unregisterContentScripts();
-  if (!state.enabled) return;
   const entry = (id, file, world, cover) => (cover.all
     ? { id, js: [file], world, ...SCRIPT, ...(cover.sites.length && { excludeMatches: patterns(cover.sites) }) }
     : cover.sites.length > 0 && { id, js: [file], world, ...SCRIPT, matches: patterns(cover.sites) });
   // chrome runs these in ID order not array order (that one was fun to find), so the "1-" ones
-  // run first and tell fingerprint.js to back off (normal window) or go easy (medium)
-  const scripts = [
-    state.incognitoOnly && { id: '1-skip-normal', js: ['skip-normal.js'], world: 'ISOLATED', ...SCRIPT },
+  // run first and tell fingerprint.js to back off (normal window) or go easy (medium).
+  // skip-normal only where fingerprint.js runs, its the one that removes skip-normal's marker
+  const scripts = !state.enabled ? [] : [
+    state.incognitoOnly && entry('1-skip-normal', 'skip-normal.js', 'ISOLATED', coverage(state, ['medium', 'high'])),
     entry('1-level-medium', 'level-medium.js', 'ISOLATED', coverage(state, ['medium'])),
     entry('1-workers-check', 'workers-check.js', 'ISOLATED', coverage(state, ['high'])),
     entry('2-fingerprint', 'fingerprint.js', 'MAIN', coverage(state, ['medium', 'high'])),
   ].filter(Boolean);
+  // the worker restarts all the time and syncs every time. re-registering the same scripts leaves a
+  // gap where a page loading right then gets no protection, so only touch them when they changed
+  const sig = (list) => JSON.stringify(list.map((s) => [s.id, s.js, s.matches || [], s.excludeMatches || [], s.world || 'ISOLATED']).sort());
+  if (sig(await chrome.scripting.getRegisteredContentScripts()) === sig(scripts)) return;
+  await chrome.scripting.unregisterContentScripts();
   if (scripts.length) await chrome.scripting.registerContentScripts(scripts);
 }
 
@@ -156,7 +162,15 @@ async function applyRules(state) {
         condition: { urlFilter: '|http://', resourceTypes: ALL_TYPES, excludedRequestDomains: ['localhost', 'onion', ...offSites(state)], ...tabScope },
       });
       // router, nas etc on ur local network dont have https, leave them alone
-      addRules.push({ id: RULE.LOCAL_HTTP, priority: 2, action: { type: 'allow' }, condition: { regexFilter: `^http://${PRIVATE_IP}`, resourceTypes: ALL_TYPES } });
+      addRules.push({ id: RULE.LOCAL_HTTP, priority: 2, action: { type: 'allow' }, condition: { regexFilter: PRIVATE_HTTP, resourceTypes: ALL_TYPES } });
+    }
+    // the proxy script only sees where a request goes, not which page made it, so an Off site
+    // embedded in a protected page (video, widget, image) would load DIRECT = ur real ip leaks on
+    // the protected page. Off sites only load when u visit them directly
+    const offs = offSites(state);
+    if (offs.length) {
+      addRules.push({ id: RULE.OFF_EMBEDS, priority: 1, action: { type: 'block' }, condition: {
+        requestDomains: offs, excludedInitiatorDomains: offs, resourceTypes: ALL_TYPES.filter((t) => t !== 'main_frame'), ...tabScope } });
     }
     if (state.blockTrackers) {
       // only when loaded on OTHER sites, and never on sites u set to Off
@@ -170,6 +184,10 @@ async function applyRules(state) {
 }
 
 async function applyAlarm({ enabled, autoRotate }) {
+  // ports can change without the popup open (rotator restarted, popup closed mid new ip...), so
+  // check every 30s. otherwise chrome keeps dead ports and every site shares the 9050 fallback
+  if (!enabled) await chrome.alarms.clear('ports');
+  else if (!(await chrome.alarms.get('ports'))) await chrome.alarms.create('ports', { periodInMinutes: 0.5 });
   const alarm = await chrome.alarms.get('rotate');
   if (!enabled || !autoRotate) {
     if (alarm) await chrome.alarms.clear('rotate');
@@ -221,8 +239,21 @@ const sync = () => run(async () => {
 }, true).then(() => paintBadges()).catch((e) => console.error('[TorGuard] badge', e));
 const syncRules = () => run(async () => applyRules(await readState()), false);
 
+// ask the rotator which per site ports are open right now (cheap, doesnt build circuits)
+async function syncPorts() {
+  const { enabled, ports = [] } = await chrome.storage.session.get(['enabled', 'ports']);
+  if (!enabled) return;
+  try {
+    const data = await (await fetch(`${ROTATOR_API}/ports`, { signal: AbortSignal.timeout(10000) })).json();
+    if (Array.isArray(data.ports) && data.ports.length && JSON.stringify(data.ports) !== JSON.stringify(ports)) {
+      await chrome.storage.session.set({ ports: data.ports });
+    }
+  } catch {} // tor / rotator not up yet, the next alarm tries again
+}
+
 // auto rotate: new circuits for every site on whatever schedule u picked
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'ports') return syncPorts();
   if (alarm.name !== 'rotate') return;
   let result;
   try {
@@ -264,7 +295,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // native host (install_host.bat): turning protection on/off starts/stops tor + the rotator so u dont
 // need the .bat window. if its not installed this just fails and u use start_privacy.bat instead
-async function host(cmd) {
+// one call at a time, and each one does whatever matches the switch WHEN it runs. otherwise off+on
+// quickly runs a slow stop and a start together, the stop kills tor after the start said ok
+let hostQueue = Promise.resolve();
+const hostSync = () => (hostQueue = hostQueue.then(async () => {
+  const { enabled = false } = await chrome.storage.session.get('enabled');
+  const cmd = enabled ? 'start' : 'stop';
   let status;
   try {
     status = { available: true, cmd, ...(await chrome.runtime.sendNativeMessage('com.torguard.host', { cmd })) };
@@ -272,19 +308,41 @@ async function host(cmd) {
     status = { available: false, cmd, ok: false, message: e?.message || String(e) };
   }
   await chrome.storage.session.set({ hostStatus: { ...status, at: Date.now() } });
-}
+}).catch((e) => console.error('[TorGuard] host', e)));
 
-const STATUS_KEYS = ['lastError', 'autoRotateResult', 'hostStatus']; // stuff this worker writes, not settings
+// what each tab's page was really loaded with. the popup compares it with the settings now, so it
+// doesnt say "through tor" for a page that loaded before u turned it on or changed its level
+chrome.webRequest.onBeforeRequest.addListener((d) => {
+  if (d.tabId < 0) return;
+  (async () => {
+    const state = await readState();
+    const tab = await chrome.tabs.get(d.tabId).catch(() => null);
+    const host = new URL(d.url).hostname;
+    const level = levelOf(state, host);
+    const tor = state.enabled && (state.incognitoOnly ? Boolean(tab?.incognito) && state.incognitoAllowed : true)
+      && level !== 'off' && !isLocal(host);
+    await chrome.storage.session.set({ [`page${d.tabId}`]: { host, tor, level } });
+  })().catch(() => {});
+}, { urls: ['<all_urls>'], types: ['main_frame'] });
+
+// stuff this worker writes, not settings (page records are page<tabId>)
+const isStatusKey = (key) => ['lastError', 'autoRotateResult', 'hostStatus'].includes(key) || /^page\d+$/.test(key);
 chrome.storage.onChanged.addListener((changes) => {
-  if (changes.enabled && changes.enabled.newValue !== changes.enabled.oldValue) host(changes.enabled.newValue ? 'start' : 'stop');
-  if (Object.keys(changes).some((key) => !STATUS_KEYS.includes(key))) sync();
+  if (changes.enabled && changes.enabled.newValue !== changes.enabled.oldValue) {
+    hostSync().then(syncPorts); // tor might already be up (started by hand), grab its ports right away
+  }
+  if (changes.hostStatus?.newValue?.cmd === 'start' && changes.hostStatus.newValue.ok) syncPorts();
+  if (Object.keys(changes).some((key) => !isStatusKey(key))) sync();
   else if ('lastError' in changes) paintBadges();
 });
 chrome.runtime.onStartup.addListener(() => {
   sync(); // chrome keeps proxy settings after a restart, reset them
-  host('stop'); // protection starts off, so stop a tor the popup left running last time
+  hostSync(); // protection starts off, so this stops a tor the popup left running last time
 });
 chrome.tabs.onCreated.addListener(syncRules);
-chrome.tabs.onRemoved.addListener(syncRules);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  syncRules();
+  chrome.storage.session.remove(`page${tabId}`).catch(() => {});
+});
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => { if (change.url) paintBadges(tab); });
 sync();

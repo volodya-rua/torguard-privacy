@@ -8,7 +8,7 @@ const LEVEL_TEXT = {
   high: 'Also adds noise to canvas, WebGL and audio fingerprints. Most private.',
 };
 // firewall / bot protection block pages (cloudflare, akamai, imperva, perimeterx...)
-const BLOCK_SIGNS = /sorry, you have been blocked|attention required! \| cloudflare|error 10(06|07|08|12|20)\b|access denied[\s\S]{0,200}(cloudflare|reference #)|you don't have permission to access|incapsula incident id|access to this page has been denied|blocked by network security/i;
+const BLOCK_SIGNS = /sorry, you have been blocked|attention required! \| cloudflare|error 10(06|07|08|12|20)\b|access denied[\s\S]{0,200}(cloudflare|reference #)|you don't have permission to access[\s\S]{0,400}reference #|incapsula incident id|access to this page has been denied|blocked by network security/i;
 
 const statePanel = $('state');
 const statusText = $('statusText');
@@ -64,14 +64,16 @@ let host = ''; // full hostname of the tab, like www.example.com
 let site = ''; // its site key, like example.com (per site levels get saved under this)
 let slot = 0;
 let pageLevel = null; // the level the open page was loaded with
-let usingTor = false; // is this tab actually going through tor right now
+let usingTor = false; // does this tab go through tor with the settings as they are now
+let pageRec = null; // what the open page was really loaded with (background records it per tab)
+let pageTor = false; // did the open page really load through tor (and still does)
+let stalePage = false; // page loaded with different settings than now, needs a reload
 let ip = { state: 'loading' };
 let note = null; // rotate result that stays until u do something else
+// one port changing thing at a time (new ip, fastest, exit country, bridges). otherwise they
+// overwrite each others ports, or "put the saved country back" runs in the middle of ur switch
 let busy = false;
 let blocked = false;
-// one exit country switch at a time. otherwise "put the saved country back" (refreshIP) could run
-// during ur switch and tor ends up in a different country than the dropdown says
-let exitBusy = false;
 let pings = []; // last 20 pings in ms (null = no reply)
 let pingError = null;
 let localError = '';
@@ -110,9 +112,10 @@ function describe(e) {
     return { offline: true, title: 'Rotator offline',
       message: h?.available ? 'Turn protection off and on again to start it.' : 'Start it with start_privacy.bat, or run install_host.bat once so this button starts Tor for you.' };
   }
-  if (e?.name === 'TimeoutError' || e?.code === 'timeout') return { title: 'Slow to answer', message: 'Tor is taking a while. Retrying…', auto: true };
+  // auto = worth retrying by itself. only refreshIP actually retries, it adds the "Retrying…"
+  if (e?.name === 'TimeoutError' || e?.code === 'timeout') return { title: 'Slow to answer', message: 'Tor is taking a while.', auto: true };
   switch (e?.code) {
-    case 'tor_starting': return { title: 'Tor is starting', message: `${e.message} Retrying…`, auto: true };
+    case 'tor_starting': return { title: 'Tor is starting', message: e.message, auto: true };
     case 'tor_control_unreachable':
     case 'tor_unreachable': return { title: 'Tor not reachable', message: e.message };
     case 'tor_auth_failed': return { title: 'Tor refused the rotator', message: 'Restart start_privacy.bat.' };
@@ -149,6 +152,9 @@ async function load() {
   S.autoRotate = [0, 10, 30, 60].includes(local.autoRotate) ? local.autoRotate : 0;
   S.exitCountry = typeof local.exitCountry === 'string' ? local.exitCountry : 'any';
   S.allowed = await chrome.extension.isAllowedIncognitoAccess();
+  const key = `page${tab?.id}`;
+  const rec = tab?.id ? (await chrome.storage.session.get(key))[key] : null;
+  pageRec = rec && rec.host === host ? rec : null; // other host = it navigated, record is old
 }
 
 function paintSettings() {
@@ -162,7 +168,8 @@ function paintSettings() {
     : r.ok ? `Last change ${ago(r.at)}.` : `Last try failed (${ago(r.at)}): ${r.message}`;
   autoHint.className = `hint${S.autoRotate && r && !r.ok ? ' err' : ''}`;
   // while a switch runs the saved country is still the old one, dont snap the dropdown back to it
-  if (document.activeElement !== exitSelect && !exitBusy) exitSelect.value = S.exitCountry;
+  // shows what tor actually uses (if a re-apply failed that can differ from the saved one)
+  if (document.activeElement !== exitSelect && !busy) exitSelect.value = tor.exitCountry && tor.exitCountry !== 'custom' ? tor.exitCountry : S.exitCountry;
   if (tor.geoip === false) {
     exitHint.textContent = 'Your Tor is missing its country data (GeoIP file).';
     exitHint.className = 'hint warn';
@@ -186,6 +193,7 @@ async function render() {
   let title = 'Off';
   let detail = 'Browsing uses your normal connection.';
   let fix = false;
+  let proxyOurs = false; // chrome is really using our proxy settings right now
   if (S.enabled) {
     state = 'on';
     title = 'Protected';
@@ -193,12 +201,14 @@ async function render() {
     if (!S.allowed && S.incognitoOnly) {
       [state, title, fix] = ['warn', 'Not active', true];
       detail = '“Allow in Incognito” is off for this extension, so nothing goes through Tor.';
-    } else if (!S.allowed) {
-      fix = true;
-      detail = 'Normal windows go through Tor. Incognito windows aren\'t covered until you allow it.';
     } else {
+      if (!S.allowed) {
+        fix = true;
+        detail = 'Normal windows go through Tor. Incognito windows aren\'t covered until you allow it.';
+      }
       try {
         const { levelOfControl } = await chrome.proxy.settings.get({ incognito: S.incognitoOnly });
+        proxyOurs = levelOfControl === 'controlled_by_this_extension';
         if (levelOfControl === 'controlled_by_other_extensions' || levelOfControl === 'not_controllable') {
           [state, title, fix] = ['warn', 'Not active', true];
           detail = 'Another extension or a policy controls the proxy, so Tor isn\'t being used.';
@@ -210,7 +220,11 @@ async function render() {
     detail = 'Turn on “Allow in Incognito” for this extension first, or nothing will go through Tor.';
   }
   // whether stuff goes through tor depends on the settings above, not on some error message
-  usingTor = state === 'on' && (!S.incognitoOnly || !tab || tab.incognito) && !(site && siteLevel() === 'off');
+  usingTor = state === 'on' && proxyOurs && (!S.incognitoOnly || !tab || tab.incognito) && !(site && siteLevel() === 'off')
+    && !(host && isLocal(host)); // the proxy script sends ur own network direct
+  // no record (page was open before the extension started) = trust the settings
+  pageTor = usingTor && (!pageRec || pageRec.tor);
+  stalePage = Boolean(pageRec) && (pageRec.tor !== usingTor || (usingTor && pageRec.level !== siteLevel()));
   const error = localError || (S.enabled && S.lastError ? `Couldn't apply protection: ${S.lastError}` : '');
   if (error) state = 'warn';
 
@@ -234,7 +248,7 @@ async function render() {
     siteHint.className = `hint${level === 'off' ? ' warn' : ''}`;
     useDefaultBtn.hidden = !custom;
     useDefaultBtn.textContent = `Use default (${S.defaultLevel[0].toUpperCase()}${S.defaultLevel.slice(1)})`;
-    siteReloadBtn.hidden = !(S.enabled && tab?.id && pageLevel !== null && level !== pageLevel);
+    siteReloadBtn.hidden = !(tab?.id && (pageRec ? stalePage : S.enabled && pageLevel !== null && level !== pageLevel));
   }
   for (const r of document.querySelectorAll('input[name="defaultLevel"]')) r.checked = r.value === S.defaultLevel;
   incognitoBox.checked = S.incognitoOnly;
@@ -262,6 +276,7 @@ function paintIP() {
   } else if (!usingTor) [view, value] = ['idle', 'Not using Tor'];
   else if (ip.state === 'ok') [value, meta] = [ip.value, ip.location && ip.location !== '??' ? ip.location : ''];
   else if (ip.state === 'error') [value, hint, tone, retry] = [ip.title, ip.message, ip.offline ? '' : 'err', !ip.auto];
+  if (usingTor && pageRec && !pageRec.tor) [hint, tone] = ['This page loaded without Tor. Reload it to use Tor.', 'err'];
   if (note) [hint, tone] = [note.text, note.tone || ''];
 
   ipBox.dataset.state = view;
@@ -273,7 +288,7 @@ function paintIP() {
   ipHint.title = note?.detail || ip.detail || '';
   reloadBtn.hidden = !note?.reload;
   retryBtn.hidden = !retry || Boolean(note);
-  rotateBtn.disabled = !S.enabled || busy || Boolean(ip.offline);
+  rotateBtn.disabled = !S.enabled || busy || Boolean(ip.offline) || Boolean(site && !usingTor); // a new ip does nothing for an Off site
   fastestBtn.disabled = !usingTor || busy || ip.state !== 'ok';
 }
 
@@ -307,7 +322,7 @@ function paintPing() {
 function paintBlocked() {
   blockedBox.hidden = !blocked;
   if (!blocked) return;
-  const viaTor = usingTor;
+  const viaTor = pageTor; // about how the page (and its block) loaded
   blockedBody.textContent = viaTor
     ? 'Many sites block all Tor IPs. A new IP or a lower level below can help. Off always works, but shows your real IP.'
     : 'This site isn\'t going through Tor right now, so this block isn\'t about Tor. Try reloading the page.';
@@ -346,30 +361,54 @@ async function refreshIP(quiet = false) {
     ip = { state: 'ok', value: data.current_ip, location: data.location };
     tor = { geoip: data.geoip ?? null, exitCountry: data.exit_country ?? null, bridges: data.bridges ?? null };
     await usePorts(data.ports);
-    // tor forgets the exit country when it restarts, put it back
-    if (S.exitCountry !== 'any' && tor.geoip && tor.exitCountry !== S.exitCountry) setExit(S.exitCountry);
+    // tor forgets the exit country when it restarts (or a switch got cut off), make it match the setting
+    // ('custom' = ExitNodes set in ur own torrc, leave that alone)
+    if (tor.geoip && tor.exitCountry && tor.exitCountry !== 'custom' && tor.exitCountry !== S.exitCountry) setExit(S.exitCountry);
   } catch (e) {
     ip = { state: 'error', ...describe(e), detail: e.detail || e.message };
-    if (ip.auto && ++statusTries < 40) setTimeout(() => refreshIP(true), 3000); // tor can take a minute (longer with bridges)
+    if (ip.auto && ++statusTries < 40) {
+      ip.message += ' Retrying…';
+      setTimeout(() => refreshIP(true), 3000); // tor can take a minute (longer with bridges)
+    } else {
+      ip.auto = false; // gave up, show the try again button
+    }
   }
   paintIP();
   paintPing();
   paintSettings();
 }
 
+// the controls the port changing stuff uses, all locked while one runs
+const opControls = () => [exitSelect, bridgesSelect, blockedRotate, rotateAllBtn];
+function startOp() {
+  if (busy) return false;
+  busy = true;
+  for (const el of opControls()) el.disabled = true;
+  paintIP();
+  return true;
+}
+function endOp() {
+  busy = false;
+  for (const el of opControls()) el.disabled = false;
+  paintIP();
+  // worked or not, tor might have new ports now (a failed switch can still swap them), grab them
+  getJSON('/ports', 10000).then((d) => usePorts(d.ports)).catch(() => {});
+}
+
 async function setExit(country) {
-  if (exitBusy) return;
-  exitBusy = true;
+  if (!startOp()) return;
+  const before = S.exitCountry;
   exitSelect.value = country;
-  exitSelect.disabled = true;
   exitHint.dataset.message = '1';
   exitHint.textContent = country === 'any' ? 'Going back to any country…' : 'Switching exits…';
   exitHint.className = 'hint';
   try {
-    const data = await getJSON(`/exit?country=${country}&slot=${slot}`, 90000);
-    await usePorts(data.ports);
+    // saved first: if the popup closes before tor answers, tor + the setting still end up the same
     await save('local', { exitCountry: country });
     S.exitCountry = country;
+    const data = await getJSON(`/exit?country=${country}&slot=${slot}`, 90000);
+    await usePorts(data.ports);
+    pings = [];
     ip = { state: 'ok', value: data.new_ip, location: data.location };
     tor.exitCountry = country;
     const name = [...exitSelect.options].find((o) => o.value === country)?.text || country.toUpperCase();
@@ -380,11 +419,12 @@ async function setExit(country) {
     exitHint.textContent = d.message;
     exitHint.className = 'hint err';
     exitHint.title = e.detail || '';
-    exitSelect.value = S.exitCountry; // nothing changed
+    if (country !== before) { // tor kept the old setting, so does the dropdown
+      await save('local', { exitCountry: before });
+      S.exitCountry = before;
+    }
   } finally {
-    exitBusy = false;
-    exitSelect.disabled = false;
-    paintIP();
+    endOp();
     paintSettings();
   }
 }
@@ -421,7 +461,7 @@ async function forgetSite() {
 
 let pinging = false;
 async function pingOnce() {
-  if (pinging || !usingTor || ip.offline) return;
+  if (pinging || busy || !usingTor || ip.offline) return; // mid switch the port is about to close
   pinging = true;
   try {
     const port = S.ports.length ? S.ports[slot] : 9050;
@@ -462,11 +502,8 @@ async function checkBlocked() {
 
 // scope 'site': only this site gets a new ip (others stay logged in). 'all': every site does
 async function rotate({ reloadAfter = false, scope = site ? 'site' : 'all' } = {}) {
-  if (busy) return;
-  busy = true;
+  if (!startOp()) return;
   rotateBtn.classList.add('busy');
-  blockedRotate.disabled = true;
-  rotateAllBtn.disabled = true;
   note = { text: scope === 'site' ? `Getting a new Tor circuit for ${site}…` : 'Getting new Tor circuits for every site…' };
   paintIP();
   try {
@@ -483,7 +520,7 @@ async function rotate({ reloadAfter = false, scope = site ? 'site' : 'all' } = {
       return;
     } else {
       const who = data.scope === 'site' ? `${site} has a new IP` : 'Every site has a new IP';
-      note = { text: `${who} (was ${data.old_ip}). Reload to use it.`, tone: 'ok', reload: Boolean(tab?.id) };
+      note = { text: `${who}${data.old_ip ? ` (was ${data.old_ip})` : ''}. Reload to use it.`, tone: 'ok', reload: Boolean(tab?.id) };
     }
   } catch (e) {
     const d = describe(e);
@@ -494,18 +531,14 @@ async function rotate({ reloadAfter = false, scope = site ? 'site' : 'all' } = {
       note = { text: `Couldn't get new circuits. ${d.message}`, tone: 'err', detail: e.detail || e.message };
     }
   } finally {
-    busy = false;
     rotateBtn.classList.remove('busy');
-    blockedRotate.disabled = false;
-    rotateAllBtn.disabled = false;
-    paintIP();
+    endOp();
   }
 }
 
 // try a few circuits for this site and keep the quickest (rotator does the measuring)
 async function findFastest() {
-  if (busy) return;
-  busy = true;
+  if (!startOp()) return;
   fastestBtn.classList.add('busy');
   note = { text: `Trying 4 circuits for ${site || 'this page'}…` };
   paintIP();
@@ -522,19 +555,19 @@ async function findFastest() {
   } catch (e) {
     note = { text: `Couldn't test circuits. ${describe(e).message}`, tone: 'err', detail: e.detail || e.message };
   } finally {
-    busy = false;
     fastestBtn.classList.remove('busy');
-    paintIP();
+    endOp();
   }
 }
 
 async function setBridges(mode) {
-  bridgesSelect.disabled = true;
+  if (!startOp()) return;
   bridgesHint.className = 'hint';
   bridgesHint.textContent = mode === 'off' ? 'Switching back to normal Tor relays…' : `Connecting through ${bridgesSelect.selectedOptions[0].text} bridges. This can take a minute…`;
   try {
     const data = await getJSON(`/bridges?mode=${mode}&slot=${slot}`, 150000);
     await usePorts(data.ports);
+    pings = [];
     ip = { state: 'ok', value: data.new_ip, location: data.location };
     tor.bridges = mode;
     bridgesHint.textContent = mode === 'off' ? 'Back to normal Tor relays.' : 'On. Fully hidden from the next Tor start; old connections fade out in a few minutes.';
@@ -545,15 +578,14 @@ async function setBridges(mode) {
     bridgesHint.title = e.detail || '';
     bridgesSelect.value = tor.bridges || 'off';
   } finally {
-    bridgesSelect.disabled = false;
-    paintIP();
+    endOp();
   }
 }
 
 // how many trackers the block rules caught on this tab since it loaded
 async function countTrackers() {
   trackerHint.hidden = true;
-  if (!tab?.id || !S.blockTrackers || !usingTor) return 0;
+  if (!tab?.id || !S.blockTrackers || !pageTor) return 0;
   try {
     const { rulesMatchedInfo } = await chrome.declarativeNetRequest.getMatchedRules({ tabId: tab.id });
     const n = rulesMatchedInfo.filter((m) => m.rule.ruleId === 4 || m.rule.ruleId >= 10).length;
@@ -600,10 +632,11 @@ async function runLeakTest() {
   leakBtn.textContent = 'Testing…';
   const rows = [];
   const add = (state, label, detail) => rows.push({ state, label, detail });
-  const level = site ? siteLevel() : S.defaultLevel;
+  const level = pageRec?.level ?? (site ? siteLevel() : S.defaultLevel);
 
-  add(usingTor && ip.state === 'ok' ? 'pass' : 'fail', 'Traffic goes through Tor',
-    usingTor ? (ip.state === 'ok' ? `${site || 'This page'} sees ${ip.value}, not your IP` : 'Tor isn\'t answering') : 'This page uses your real connection');
+  add(pageTor && ip.state === 'ok' ? 'pass' : 'fail', 'Traffic goes through Tor',
+    pageTor ? (ip.state === 'ok' ? `${site || 'This page'} sees ${ip.value}, not your IP` : 'Tor isn\'t answering')
+      : usingTor ? 'This page loaded without Tor. Reload it, then test again' : 'This page uses your real connection');
 
   let proxied = false;
   let prediction = null;
@@ -613,9 +646,11 @@ async function runLeakTest() {
     prediction = (await chrome.privacy.network.networkPredictionEnabled.get({ incognito: S.incognitoOnly })).value;
   } catch {}
   // the proxy being on somewhere doesnt mean THIS page uses it (Off site, normal window in incognito only mode)
-  if (!usingTor) add('fail', 'DNS goes through Tor', 'Names are looked up by your normal DNS, so your ISP sees which sites you visit');
+  if (!pageTor) add('fail', 'DNS goes through Tor', 'Names are looked up by your normal DNS, so your ISP sees which sites you visit');
   else add(proxied && prediction === false ? 'pass' : 'fail', 'DNS goes through Tor',
-    proxied ? 'Names are looked up by the Tor exit, nothing is prefetched outside Tor' : 'The Tor proxy isn\'t active');
+    !proxied ? 'The Tor proxy isn\'t active'
+      : prediction === false ? 'Names are looked up by the Tor exit, nothing is prefetched outside Tor'
+      : 'Chrome may look up names ahead of time outside Tor (preloading is on)');
 
   let page = null;
   try {
@@ -624,7 +659,7 @@ async function runLeakTest() {
   if (!page) {
     add('na', 'WebRTC and fingerprint', 'Can\'t test on this kind of page');
   } else {
-    if (!usingTor) add('na', 'WebRTC', 'Doesn\'t matter here, the site already sees your real IP');
+    if (!pageTor) add('na', 'WebRTC', 'Doesn\'t matter here, the site already sees your real IP');
     else add(page.rtcLeaks.length ? 'fail' : 'pass', 'WebRTC can\'t leak your IP',
       page.rtcLeaks.length ? `Exposed: ${page.rtcLeaks.join(', ')}` : page.rtcBlocked ? 'WebRTC isn\'t available here' : 'No direct connections offered');
     if (level === 'low' || level === 'off') {
@@ -645,13 +680,18 @@ async function runLeakTest() {
   }
 
   const proto = tab?.url ? new URL(tab.url).protocol : '';
-  if (proto === 'https:') add('pass', 'Page is encrypted (HTTPS)', usingTor ? 'Tor exit relays can\'t read or change it' : 'Your wifi and ISP can\'t read or change it, but they see the site name');
-  else if (proto === 'http:') add('fail', 'Page is not encrypted', S.forceHttps ? 'This site has no HTTPS version' : 'Turn on Force HTTPS');
+  if (proto === 'https:') add('pass', 'Page is encrypted (HTTPS)', pageTor ? 'Tor exit relays can\'t read or change it' : 'Your wifi and ISP can\'t read or change it, but they see the site name');
+  else if (proto === 'http:' && host.endsWith('.onion')) add('pass', 'Page is encrypted (onion)', 'Tor encrypts .onion sites end to end');
+  else if (proto === 'http:') {
+    add('fail', 'Page is not encrypted', !S.forceHttps ? 'Turn on Force HTTPS'
+      : isLocal(host) ? 'Pages on your own network are left alone'
+      : pageTor ? 'This site has no HTTPS version' : 'Force HTTPS only works on pages that go through Tor');
+  }
   else add('na', 'HTTPS', 'Not a website');
 
   const trackers = await countTrackers();
   if (!S.blockTrackers) add('na', 'Trackers', 'Tracker blocking is off');
-  else if (!usingTor) add('fail', 'Trackers blocked', level === 'off' ? 'Nothing is blocked on Off sites, on purpose' : 'Only blocked on pages that go through Tor');
+  else if (!pageTor) add('fail', 'Trackers blocked', level === 'off' ? 'Nothing is blocked on Off sites, on purpose' : 'Only blocked on pages that go through Tor');
   else if (trackers === null) add('na', 'Trackers', 'Couldn\'t count right now');
   else add('pass', 'Trackers blocked', trackers ? `${trackers} blocked on this page` : 'None found on this page');
 

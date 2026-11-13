@@ -18,7 +18,7 @@ import threading
 import subprocess
 import argparse
 import winreg
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 import socks  # pip install PySocks
 import requests  # pip install requests
@@ -101,9 +101,30 @@ def start_tor_if_needed():
         sys.exit(1)
 
 
+PROXY_VALUES = ("ProxyEnable", "ProxyServer", "ProxyOverride")
+saved_proxy = None  # ur proxy settings from before, put back on exit
+
+
+def read_system_proxy():
+    values = {}
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as key:
+        for name in PROXY_VALUES:
+            try:
+                values[name] = winreg.QueryValueEx(key, name)  # (value, type)
+            except FileNotFoundError:
+                values[name] = None
+    return values
+
+
 def set_system_proxy(host, port):
     """Set Windows system proxy via registry. Affects all apps including Electron."""
+    global saved_proxy
     try:
+        if saved_proxy is None:
+            saved_proxy = read_system_proxy()
+            # still pointing at us = a last run that crashed, not ur real settings
+            if f"{host}:{port}" in str((saved_proxy.get("ProxyServer") or ("",))[0]):
+                saved_proxy = {}
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                              r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
                              0, winreg.KEY_SET_VALUE)
@@ -118,12 +139,38 @@ def set_system_proxy(host, port):
         return False
 
 
+def restore_proxy_on_close():
+    """closing the console window (X button) skips every finally block, so the system proxy would
+    stay pointed at our dead port and other apps lose internet. windows gives a few secs to clean up"""
+    import ctypes
+    def on_event(event):
+        if event in (2, 5, 6):  # window closed, logoff, shutdown
+            restore_system_proxy()
+        return 0  # let windows go on and close it
+    restore_proxy_on_close.handler = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(on_event)  # keep it alive
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(restore_proxy_on_close.handler, True)
+
+
 def restore_system_proxy():
-    """Disable system proxy and restore original settings."""
+    """Put back the proxy settings u had before (or just turn the proxy off if there were none)."""
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                              r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
                              0, winreg.KEY_SET_VALUE)
+        if saved_proxy:
+            for name in PROXY_VALUES:
+                if saved_proxy.get(name) is not None:
+                    winreg.SetValueEx(key, name, 0, saved_proxy[name][1], saved_proxy[name][0])
+                elif name == "ProxyEnable":
+                    winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, 0)
+                else:
+                    try:
+                        winreg.DeleteValue(key, name)
+                    except FileNotFoundError:
+                        pass
+            winreg.CloseKey(key)
+            print("[+] System proxy restored")
+            return True
         winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         try:
             winreg.DeleteValue(key, "ProxyServer")
@@ -217,7 +264,9 @@ class HTTPConnectProxy(BaseHTTPRequestHandler):
             remote.settimeout(30)
             remote.connect((host, port))
             req_line = f"{self.command} {path} HTTP/1.1\r\n"
-            headers = dict(self.headers)
+            # we read the answer till the server hangs up, so ask it to hang up (no keep-alive)
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("connection", "proxy-connection", "keep-alive")}
+            headers["Connection"] = "close"
             headers["Host"] = host
             for k, v in get_random_headers().items():
                 headers.setdefault(k, v)
@@ -362,7 +411,7 @@ def main():
             print(f"[!] WARP setup failed: {e}. Continuing with Tor only.")
 
     # 3. Start HTTP CONNECT proxy
-    http_server = HTTPServer(("127.0.0.1", LOCAL_HTTP_PROXY_PORT), HTTPConnectProxy)
+    http_server = ThreadingHTTPServer(("127.0.0.1", LOCAL_HTTP_PROXY_PORT), HTTPConnectProxy)  # one tunnel per thread
     threading.Thread(target=http_server.serve_forever, daemon=True).start()
     print(f"[+] HTTP CONNECT proxy on 127.0.0.1:{LOCAL_HTTP_PROXY_PORT}")
 
@@ -413,7 +462,8 @@ def main():
     if uses_system_proxy:
         print(f"[+] Detected Electron/Chromium app: {os.path.basename(app_path)}")
         print(f"[+] Setting Windows system proxy (honored natively by Electron)")
-        set_system_proxy("127.0.0.1", LOCAL_HTTP_PROXY_PORT)
+        if set_system_proxy("127.0.0.1", LOCAL_HTTP_PROXY_PORT):
+            restore_proxy_on_close()
         cmd = args.app  # No CLI flags needed!
     else:
         print(f"[+] Non-Electron app, using env-var proxy only")
@@ -431,7 +481,8 @@ def main():
     print(f"  [OK] IPv6 leak blocked     : NO_PROXY excludes ::1")
     print(f"  [OK] Local server preserved : Loopback excluded from proxy")
     print(f"  [OK] Device fingerprint    : Randomized UA + headers + session")
-    print(f"  [OK] Circuit rotation      : Every {ROTATION_INTERVAL // 60} min")
+    rotation = "Manual (from the extension)" if args.no_rotate else f"Every {ROTATION_INTERVAL // 60} min"
+    print(f"  [OK] Circuit rotation      : {rotation}")
     print(f"  [OK] Method                : {'System proxy (Electron)' if uses_system_proxy else 'Env vars (CLI)'}")
     print("-" * 60)
     print()
