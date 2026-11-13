@@ -433,7 +433,14 @@ async function checkBlocked() {
   try {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: (pattern) => new RegExp(pattern, 'i').test(`${document.title}\n${(document.body?.innerText || '').slice(0, 3000)}`),
+      // real block pages come back as 403 / 429 / 503. a normal page that just mentions "access denied"
+      // or "you have been blocked" (articles, help pages, forums) loads fine, so those dont count
+      func: (pattern) => {
+        const status = performance.getEntriesByType('navigation')[0]?.responseStatus || 0;
+        const text = (document.body?.innerText || '').slice(0, 3000);
+        const errorPage = status ? status >= 400 : text.length < 2000; // no status = guess, block pages are tiny
+        return errorPage && new RegExp(pattern, 'i').test(`${document.title}\n${text}`);
+      },
       args: [BLOCK_SIGNS.source],
     });
     blocked = result === true;
