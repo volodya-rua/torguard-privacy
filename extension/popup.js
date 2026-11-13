@@ -46,12 +46,19 @@ const exitHint = $('exitHint');
 const autoSelect = $('autoRotate');
 const autoHint = $('autoHint');
 const rotateAllBtn = $('rotateAllBtn');
+const fastestBtn = $('fastestBtn');
+const trackerHint = $('trackerHint');
+const blockTrackersBox = $('blockTrackers');
+const bridgesSelect = $('bridges');
+const bridgesHint = $('bridgesHint');
+const leakBtn = $('leakBtn');
+const leakResults = $('leakResults');
 
 const S = {
   enabled: false, incognitoOnly: true, allowed: false, levels: {}, defaultLevel: 'high', ports: [], lastError: null,
-  forceHttps: true, autoRotate: 0, exitCountry: 'any', autoRotateResult: null,
+  forceHttps: true, autoRotate: 0, exitCountry: 'any', autoRotateResult: null, blockTrackers: true, hostStatus: null,
 };
-let tor = { geoip: null, exitCountry: null }; // what the rotator last said about tor itself
+let tor = { geoip: null, exitCountry: null, bridges: null }; // what the rotator last said about tor itself
 let tab = null;
 let host = ''; // full hostname of the tab, like www.example.com
 let site = ''; // its site key, like example.com (per site levels get saved under this)
@@ -90,7 +97,16 @@ async function getJSON(path, timeout) {
 
 // every error becomes: a short title, what to do, and whether to retry by itself
 function describe(e) {
-  if (e instanceof TypeError) return { offline: true, title: 'Rotator offline', message: 'Start it with start_privacy.bat.' };
+  if (e instanceof TypeError) {
+    // rotator not answering: is the native host starting it right now, did that fail, or is there no host?
+    const h = S.hostStatus;
+    if (S.enabled && h?.available && h.ok && h.cmd === 'start' && Date.now() - h.at < 120000) {
+      return { title: 'Starting Tor…', message: 'Give it a few seconds.', auto: true };
+    }
+    if (h?.available && h.ok === false && h.cmd === 'start') return { offline: true, title: 'Couldn\'t start Tor', message: h.message };
+    return { offline: true, title: 'Rotator offline',
+      message: h?.available ? 'Turn protection off and on again to start it.' : 'Start it with start_privacy.bat, or run install_host.bat once so this button starts Tor for you.' };
+  }
   if (e?.name === 'TimeoutError' || e?.code === 'timeout') return { title: 'Slow to answer', message: 'Tor is taking a while. Retrying…', auto: true };
   switch (e?.code) {
     case 'tor_starting': return { title: 'Tor is starting', message: `${e.message} Retrying…`, auto: true };
@@ -102,6 +118,9 @@ function describe(e) {
     case 'bad_request': return { title: 'Old rotator', message: 'Restart start_privacy.bat to load the new rotator.' };
     case 'no_geoip': return { title: 'No country data', message: 'Your Tor has no GeoIP file, so it can\'t choose exits by country.' };
     case 'exit_failed': return { title: 'Country unavailable', message: e.message };
+    case 'no_bridges':
+    case 'bridges_failed': return { title: 'Bridges unavailable', message: e.message };
+    case 'ping_failed': return { title: 'No reply', message: e.message };
     default: return { title: 'Unavailable', message: e?.message || 'Something went wrong.' };
   }
 }
@@ -112,8 +131,10 @@ const ago = (t) => {
 };
 
 async function load() {
-  const session = await chrome.storage.session.get(['enabled', 'ports', 'lastError', 'autoRotateResult']);
-  const local = await chrome.storage.local.get(['incognitoOnly', 'levels', 'defaultLevel', 'forceHttps', 'autoRotate', 'exitCountry']);
+  const session = await chrome.storage.session.get(['enabled', 'ports', 'lastError', 'autoRotateResult', 'hostStatus']);
+  const local = await chrome.storage.local.get(['incognitoOnly', 'levels', 'defaultLevel', 'forceHttps', 'autoRotate', 'exitCountry', 'blockTrackers']);
+  S.hostStatus = session.hostStatus || null;
+  S.blockTrackers = local.blockTrackers !== false;
   S.enabled = session.enabled === true;
   S.ports = Array.isArray(session.ports) ? session.ports : [];
   S.lastError = session.lastError || null;
@@ -129,6 +150,8 @@ async function load() {
 
 function paintSettings() {
   forceHttpsBox.checked = S.forceHttps;
+  blockTrackersBox.checked = S.blockTrackers;
+  if (tor.bridges && document.activeElement !== bridgesSelect && !bridgesSelect.disabled) bridgesSelect.value = tor.bridges;
   autoSelect.value = String(S.autoRotate);
   const r = S.autoRotateResult;
   autoHint.textContent = !S.autoRotate ? 'You may get logged out of sites.'
@@ -247,6 +270,7 @@ function paintIP() {
   reloadBtn.hidden = !note?.reload;
   retryBtn.hidden = !retry || Boolean(note);
   rotateBtn.disabled = !S.enabled || busy || Boolean(ip.offline);
+  fastestBtn.disabled = !usingTor || busy || ip.state !== 'ok';
 }
 
 function paintPing() {
@@ -316,13 +340,13 @@ async function refreshIP(quiet = false) {
   try {
     const data = await getJSON(`/status?slot=${slot}`, 45000); // first call also builds every site's circuit so it can take a bit
     ip = { state: 'ok', value: data.current_ip, location: data.location };
-    tor = { geoip: data.geoip ?? null, exitCountry: data.exit_country ?? null };
+    tor = { geoip: data.geoip ?? null, exitCountry: data.exit_country ?? null, bridges: data.bridges ?? null };
     await usePorts(data.ports);
     // tor forgets the exit country when it restarts, put it back
     if (S.exitCountry !== 'any' && tor.geoip && tor.exitCountry !== S.exitCountry) setExit(S.exitCountry);
   } catch (e) {
     ip = { state: 'error', ...describe(e), detail: e.detail || e.message };
-    if (ip.auto && ++statusTries < 10) setTimeout(() => refreshIP(true), 3000);
+    if (ip.auto && ++statusTries < 40) setTimeout(() => refreshIP(true), 3000); // tor can take a minute (longer with bridges)
   }
   paintIP();
   paintPing();
@@ -461,6 +485,175 @@ async function rotate({ reloadAfter = false, scope = site ? 'site' : 'all' } = {
   }
 }
 
+// try a few circuits for this site and keep the quickest (rotator does the measuring)
+async function findFastest() {
+  if (busy) return;
+  busy = true;
+  fastestBtn.classList.add('busy');
+  note = { text: `Trying 4 circuits for ${site || 'this page'}…` };
+  paintIP();
+  try {
+    const target = host.includes('.') ? host : 'www.cloudflare.com';
+    const data = await getJSON(`/fastest?slot=${slot}&host=${encodeURIComponent(target)}`, 90000);
+    ip = { state: 'ok', value: data.new_ip, location: data.location };
+    await usePorts(data.ports);
+    if (Array.isArray(data.ports)) await proxyHas(String(data.ports[slot]));
+    pings = [];
+    note = data.changed
+      ? { text: `Switched to the fastest of ${data.tried.length} circuits (${data.tried.join(', ')} ms). Reload to use it.`, tone: 'ok', reload: Boolean(tab?.id) }
+      : { text: `Already on the fastest circuit (${data.ms} ms).`, tone: 'ok' };
+  } catch (e) {
+    note = { text: `Couldn't test circuits. ${describe(e).message}`, tone: 'err', detail: e.detail || e.message };
+  } finally {
+    busy = false;
+    fastestBtn.classList.remove('busy');
+    paintIP();
+  }
+}
+
+async function setBridges(mode) {
+  bridgesSelect.disabled = true;
+  bridgesHint.className = 'hint';
+  bridgesHint.textContent = mode === 'off' ? 'Switching back to normal Tor relays…' : `Connecting through ${bridgesSelect.selectedOptions[0].text} bridges. This can take a minute…`;
+  try {
+    const data = await getJSON(`/bridges?mode=${mode}&slot=${slot}`, 150000);
+    await usePorts(data.ports);
+    ip = { state: 'ok', value: data.new_ip, location: data.location };
+    tor.bridges = mode;
+    bridgesHint.textContent = mode === 'off' ? 'Back to normal Tor relays.' : 'On. Fully hidden from the next Tor start; old connections fade out in a few minutes.';
+    bridgesHint.className = 'hint ok';
+  } catch (e) {
+    bridgesHint.textContent = describe(e).message;
+    bridgesHint.className = 'hint err';
+    bridgesHint.title = e.detail || '';
+    bridgesSelect.value = tor.bridges || 'off';
+  } finally {
+    bridgesSelect.disabled = false;
+    paintIP();
+  }
+}
+
+// how many trackers the block rules caught on this tab since it loaded
+async function countTrackers() {
+  trackerHint.hidden = true;
+  if (!tab?.id || !S.blockTrackers || !usingTor) return 0;
+  try {
+    const { rulesMatchedInfo } = await chrome.declarativeNetRequest.getMatchedRules({ tabId: tab.id });
+    const n = rulesMatchedInfo.filter((m) => m.rule.ruleId === 4 || m.rule.ruleId >= 10).length;
+    trackerHint.textContent = n ? `${n} tracker${n === 1 ? '' : 's'} blocked on this page` : 'No trackers found on this page';
+    trackerHint.hidden = false;
+    return n;
+  } catch {
+    return null; // chrome limits how often this can be asked
+  }
+}
+
+// runs inside the page (main world) so it sees exactly what the page's own scripts see
+async function pageProbe() {
+  const out = { tz: Intl.DateTimeFormat().resolvedOptions().timeZone, langs: navigator.languages.join(','), cores: navigator.hardwareConcurrency, rtcLeaks: [] };
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    out.gpu = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '';
+  } catch {}
+  const c = document.createElement('canvas');
+  c.width = 80;
+  c.height = 20;
+  const x = c.getContext('2d');
+  x.fillStyle = '#f60'; x.fillRect(0, 0, 80, 20); x.fillStyle = '#069'; x.font = '14px Arial'; x.fillText('leak test', 2, 15);
+  out.canvas = c.toDataURL();
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    pc.createDataChannel('t');
+    pc.onicecandidate = (e) => {
+      const addr = e.candidate?.candidate.split(' ')[4];
+      if (addr && !addr.endsWith('.local')) out.rtcLeaks.push(addr);
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((r) => setTimeout(r, 1500));
+    pc.close();
+  } catch {
+    out.rtcBlocked = true;
+  }
+  return out;
+}
+
+async function runLeakTest() {
+  leakBtn.disabled = true;
+  leakBtn.textContent = 'Testing…';
+  const rows = [];
+  const add = (state, label, detail) => rows.push({ state, label, detail });
+  const level = site ? siteLevel() : S.defaultLevel;
+
+  add(usingTor && ip.state === 'ok' ? 'pass' : 'fail', 'Traffic goes through Tor',
+    usingTor ? (ip.state === 'ok' ? `${site || 'This page'} sees ${ip.value}, not your IP` : 'Tor isn\'t answering') : 'This page uses your real connection');
+
+  let proxied = false;
+  let prediction = null;
+  try {
+    const { value, levelOfControl } = await chrome.proxy.settings.get({ incognito: S.incognitoOnly });
+    proxied = levelOfControl === 'controlled_by_this_extension' && ['pac_script', 'fixed_servers'].includes(value.mode);
+    prediction = (await chrome.privacy.network.networkPredictionEnabled.get({ incognito: S.incognitoOnly })).value;
+  } catch {}
+  add(proxied && prediction === false ? 'pass' : 'fail', 'DNS goes through Tor',
+    proxied ? 'Names are looked up by the Tor exit, nothing is prefetched outside Tor' : 'The Tor proxy isn\'t active');
+
+  let page = null;
+  try {
+    [{ result: page }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: pageProbe });
+  } catch {}
+  if (!page) {
+    add('na', 'WebRTC and fingerprint', 'Can\'t test on this kind of page');
+  } else {
+    add(page.rtcLeaks.length ? 'fail' : 'pass', 'WebRTC can\'t leak your IP',
+      page.rtcLeaks.length ? `Exposed: ${page.rtcLeaks.join(', ')}` : page.rtcBlocked ? 'WebRTC isn\'t available here' : 'No direct connections offered');
+    if (level === 'low' || level === 'off') {
+      add('na', 'Fingerprint', `Left alone on ${level === 'low' ? 'Low' : 'Off'}, on purpose`);
+    } else {
+      const real = await pageProbe(); // the popup isn't protected, so this is your real fingerprint
+      const fakes = [];
+      if (page.tz === 'UTC') fakes.push(`clock UTC (real ${real.tz})`);
+      if (page.langs === 'en-US,en') fakes.push('language en-US');
+      if (page.cores === 4) fakes.push(`4 cores (real ${real.cores})`);
+      if (page.gpu && page.gpu !== real.gpu) fakes.push('common GPU');
+      add(fakes.length >= 3 ? 'pass' : 'fail', 'Fingerprint blends in', fakes.length ? fakes.join(', ') : 'Nothing is being changed');
+      if (level === 'high') {
+        add(page.canvas !== real.canvas ? 'pass' : 'fail', 'Canvas fingerprint randomized',
+          page.canvas !== real.canvas ? 'Changes on every page load' : 'Same as your real one');
+      }
+    }
+  }
+
+  const proto = tab?.url ? new URL(tab.url).protocol : '';
+  if (proto === 'https:') add('pass', 'Page is encrypted (HTTPS)', 'Tor exit relays can\'t read or change it');
+  else if (proto === 'http:') add('fail', 'Page is not encrypted', S.forceHttps ? 'This site has no HTTPS version' : 'Turn on Force HTTPS');
+  else add('na', 'HTTPS', 'Not a website');
+
+  const trackers = await countTrackers();
+  if (!S.blockTrackers) add('na', 'Trackers', 'Tracker blocking is off');
+  else if (trackers === null) add('na', 'Trackers', 'Couldn\'t count right now');
+  else add('pass', 'Trackers blocked', trackers ? `${trackers} blocked on this page` : 'None found on this page');
+
+  leakResults.replaceChildren(...rows.map(({ state, label, detail }) => {
+    const li = document.createElement('li');
+    li.className = state;
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    mark.textContent = { pass: '✓', fail: '✗', na: '–' }[state];
+    const text = document.createElement('span');
+    const b = document.createElement('b');
+    b.textContent = label;
+    const small = document.createElement('small');
+    small.textContent = detail;
+    text.append(b, small);
+    li.append(mark, text);
+    return li;
+  }));
+  leakResults.hidden = false;
+  leakBtn.disabled = false;
+  leakBtn.textContent = 'Run leak test again';
+}
+
 async function save(area, values) {
   try {
     await chrome.storage[area].set(values);
@@ -506,6 +699,10 @@ blockedDirect.addEventListener('click', async () => {
   reloadTab();
 });
 rotateAllBtn.addEventListener('click', () => rotate({ scope: 'all' }));
+fastestBtn.addEventListener('click', findFastest);
+blockTrackersBox.addEventListener('change', () => save('local', { blockTrackers: blockTrackersBox.checked }));
+bridgesSelect.addEventListener('change', () => setBridges(bridgesSelect.value));
+leakBtn.addEventListener('click', runLeakTest);
 forgetBtn.addEventListener('click', forgetSite);
 forceHttpsBox.addEventListener('change', () => save('local', { forceHttps: forceHttpsBox.checked }));
 autoSelect.addEventListener('change', () => save('local', { autoRotate: Number(autoSelect.value) }));
@@ -524,12 +721,20 @@ exitSelect.addEventListener('change', () => setExit(exitSelect.value));
   const rotateLabel = site ? `New IP for ${site}` : 'New IPs for every site';
   rotateBtn.title = rotateLabel;
   rotateBtn.setAttribute('aria-label', rotateLabel);
-  chrome.storage.onChanged.addListener(() => render());
+  chrome.storage.onChanged.addListener(async (changes) => {
+    await render();
+    // just turned on, or the native host just started tor: go look for the rotator again
+    if (changes.enabled?.newValue || (changes.hostStatus?.newValue?.cmd === 'start' && changes.hostStatus.newValue.ok)) {
+      statusTries = 0;
+      refreshIP(true);
+    }
+  });
   chrome.proxy.settings.onChange.addListener(() => render());
   await render();
   pageLevel = site ? siteLevel() : null;
   refreshIP();
   checkBlocked();
+  countTrackers();
   pingOnce();
   setInterval(pingOnce, 2000);
 })();

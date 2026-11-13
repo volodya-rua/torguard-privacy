@@ -22,7 +22,16 @@ it can do it only for incognito windows (default) or for everything. it starts O
 - **exit country** if u want all exits in one country (needs tor's geoip files, see setup)
 - **auto new ips** every 10 / 30 / 60 min
 - **forget this site.** nukes its cookies (even the httponly login ones) and storage
+- **tracker blocking.** google analytics, the facebook pixel, doubleclick, criteo, hotjar and ~100 other ad / analytics / session replay crap, but only when they load on OTHER sites so nothing breaks. the popup tells u how many it killed on the page
+- **hide tor from ur isp.** bridges (obfs4 / snowflake / meek) so ur wifi or isp just sees normal encrypted traffic instead of "this guy uses tor". uses the built in bridges from ur tor bundle
+- **fastest ip button** (the ⚡ one). tries 4 circuits for the site, pings them, keeps the quickest
+- **leak test.** one click checks tor, dns, webrtc, fingerprint, https and trackers on the page ur on
+- **one click start** (optional). run `install_host.bat` once and the turn on button starts tor itself, no more leaving the .bat window open. see below
 - toolbar badge shows the level for each tab (H / M / L / OFF, or ! if something broke)
+
+<img src="screenshots/leaktest.png" width="300" alt="leak test">
+
+(the "real" values in the leak test are from a test machine, not mine lol)
 
 ### levels
 
@@ -55,10 +64,36 @@ tested the old version of this against the new one, same chrome setup, both thru
 
 1. get the **tor expert bundle** from https://www.torproject.org/download/tor/ and extract it into this folder so u have `tor\tor.exe` and `data\geoip` (or set `TOR_HOME` to wherever ur tor is)
 2. python stuff: `pip install -r requirements.txt`
-3. run `start_privacy.bat` and leave it open. it starts tor + the rotator, press any key in it to stop everything
-4. chrome → `chrome://extensions` → turn on developer mode → **load unpacked** → pick the `extension` folder
-5. on the extension's details page turn on **allow in incognito** or incognito mode does nothing
+3. chrome → `chrome://extensions` → turn on developer mode → **load unpacked** → pick the `extension` folder
+4. on the extension's details page turn on **allow in incognito** or incognito mode does nothing
+5. either run `install_host.bat` once (then the button starts tor for u), or run `start_privacy.bat` and leave it open
 6. click the icon → turn on protection
+
+## one click start (install_host.bat)
+
+chrome has this thing called native messaging: an extension can talk to ONE program on ur pc that u registered. `install_host.bat` registers `host/torguard_host.py` for chrome / edge / brave and thats it. when u hit turn on, the extension asks it to start tor + the rotator, turn off stops them again.
+
+the host can only do 3 things (start / stop / status), only this extension (its id is fixed) is allowed to talk to it, and stop only kills the tor IT started, so a tor from `start_privacy.bat` is left alone.
+
+trade offs, cuz there are some:
+
+- **one time setup.** it adds one registry key under ur user (no admin). `install_host.bat --uninstall` removes it. move the repo folder = run it again
+- **its a door from chrome to ur pc.** a tiny one (it cant run anything else) but still, if u dont want that just use the .bat
+- **tor takes a few secs** every time u turn it on (~10-30s, longer with snowflake). the popup shows "Starting Tor…" till its up
+- **tor keeps running after chrome closes**, until u turn protection off or chrome starts again (then it gets stopped cuz protection always starts off)
+- **still needs python** installed, same as the rotator
+- Script.py (other apps thru tor) still goes thru `start_privacy.bat`
+
+## bridges (hide tor from ur isp)
+
+| | how it looks to ur isp | speed |
+|---|---|---|
+| **off** | "connects to tor" (public list of relays) | normal |
+| **obfs4** | random looking encrypted traffic | bit slower |
+| **snowflake** | looks like a video call (webrtc) to random volunteers | slowest |
+| **meek** | looks like normal https to a big cdn | slow |
+
+turning it on while tor is running switches new connections right away, the old ones fade out in a few minutes. its saved to `torguard-bridges.conf` so next time tor uses bridges from the very first connection. the bridges are the public built in ones, so if ur country blocks those u'll need private ones from bridges.torproject.org
 
 ## how the per site ip thing works
 
@@ -71,6 +106,8 @@ the rotator is a tiny local api on `127.0.0.1:8222`:
 /rotate?slot=N&scope=site|all  new circuit for one site or all of them
 /ping?port=P&host=H            round trip thru that circuit
 /exit?country=de|any           only use exits in one country
+/fastest?slot=N&host=H         try 4 circuits for a site, keep the quickest
+/bridges?mode=off|obfs4|snowflake|meek   hide tor from ur isp
 ```
 
 ## if a site blocks u
@@ -93,8 +130,10 @@ old launcher that runs any app thru tor (sets the windows proxy for electron app
 
 ```
 extension/         the chrome extension, load this folder
-tor_rotator.py     local api for per site ips, new ips, ping, exit country
-start_privacy.bat  starts tor + rotator (and Script.py if u give it an app)
+host/              native host for the one click start (+ install.py)
+install_host.bat   registers the host (--uninstall to remove)
+tor_rotator.py     local api: per site ips, new ips, ping, fastest, exit country, bridges
+start_privacy.bat  starts tor + rotator by hand (and Script.py if u give it an app)
 Script.py          run other apps thru tor
 ```
 

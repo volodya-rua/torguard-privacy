@@ -15,11 +15,14 @@ extension can say what's wrong and what to do
 """
 
 import json
+import os
 import random
 import re
 import socket
+import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -34,6 +37,8 @@ SLOT_PORTS = range(19100, 20000)    # extra SocksPorts this thing owns
 CF_TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 ROTATOR_PORT = 8222  # local api port the extension calls
 HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$", re.I)
+BRIDGE_MODES = ("off", "obfs4", "snowflake", "meek")
+BRIDGES_FILE = "torguard-bridges.conf"  # the launcher %includes this in torrc so bridges are used from the start
 
 
 class TorError(Exception):
@@ -149,11 +154,11 @@ def status(q):
     slot = q.slot()
     with controller() as ctrl:
         ports = slot_ports(ctrl)
-        country, geoip = exit_country(ctrl), has_geoip(ctrl)
+        country, geoip, bridges = exit_country(ctrl), has_geoip(ctrl), bridge_mode(ctrl)
         info = tor_trace(ports[slot])
         location = locate(ctrl, info)
     return {"current_ip": info.get("ip", "unknown"), "location": location, "ports": ports,
-            "exit_country": country, "geoip": geoip}
+            "exit_country": country, "geoip": geoip, "bridges": bridges}
 
 
 def rotate(q):
@@ -206,9 +211,13 @@ def set_exit(q):
 
 
 def ping(q):
+    port = q.port()
+    return {"ms": round(ping_ms(port, q.host())), "port": port}
+
+
+def ping_ms(port, host):
     """round trip through a site's tor circuit using tor's SOCKS RESOLVE thing: the exit just
     looks up the name, so the site itself never gets contacted (didnt want to spam sites)."""
-    port, host = q.port(), q.host()
     try:
         s = socket.create_connection(("127.0.0.1", port), timeout=15)
     except ConnectionRefusedError as e:
@@ -225,7 +234,123 @@ def ping(q):
         ms = (time.perf_counter() - start) * 1000
     if len(reply) < 2 or reply[1] != 0:
         raise TorError("ping_failed", "The Tor exit didn't answer.", 502, f"SOCKS reply {reply[:2].hex()}")
-    return {"ms": round(ms), "port": port}
+    return ms
+
+
+def fastest(q):
+    """try 3 fresh circuits for one site + the one it has now, ping each a few times, keep the quickest."""
+    slot, host = q.slot(), q.host()
+    with controller() as ctrl:
+        ports = slot_ports(ctrl)
+        current = ctrl.get_conf("SocksPort", multiple=True)
+        candidates = random.sample([p for p in SLOT_PORTS if p not in ports], 3)
+        ctrl.set_conf("SocksPort", current + [f"127.0.0.1:{p}" for p in candidates])
+        warm_up(candidates)
+
+        def speed(port):
+            times = []
+            for _ in range(3):
+                try:
+                    times.append(ping_ms(port, host))
+                except TorError:
+                    pass
+            return statistics.median(times) if times else float("inf")
+
+        tried = [ports[slot]] + candidates
+        with ThreadPoolExecutor(len(tried)) as pool:
+            timing = dict(zip(tried, pool.map(speed, tried)))
+        best = min(timing, key=timing.get)
+        new = list(ports)
+        new[slot] = best
+        keep = [v for v in current if _port(v) not in SLOT_PORTS]
+        ctrl.set_conf("SocksPort", keep + [f"127.0.0.1:{p}" for p in new])  # drop the losers
+        if timing[best] == float("inf"):
+            raise TorError("ping_failed", "None of the circuits answered. Try again in a moment.", 502)
+        info = tor_trace(best)
+        location = locate(ctrl, info)
+    return {
+        "status": "success",
+        "changed": best != ports[slot],
+        "ms": round(timing[best]),
+        "tried": sorted(round(t) for t in timing.values() if t != float("inf")),
+        "new_ip": info.get("ip", "unknown"),
+        "location": location,
+        "ports": new,
+    }
+
+
+def tor_home(ctrl):
+    """the folder tor lives in: TOR_HOME from the launcher, or wherever tor's torrc is."""
+    return Path(os.environ.get("TOR_HOME") or Path(ctrl.get_info("config-file")).parent)
+
+
+def bridge_mode(ctrl):
+    if ctrl.get_conf("UseBridges", "0") != "1":
+        return "off"
+    lines = ctrl.get_conf("Bridge", multiple=True) or []
+    return lines[0].split()[0].replace("meek_lite", "meek") if lines else "off"
+
+
+def bridge_lines(home, mode):
+    """built in bridges straight from the tor bundle's pt_config.json, so they're always current."""
+    pt = home / "tor" / "pluggable_transports"
+    try:
+        cfg = json.loads((pt / "pt_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise TorError("no_bridges", "Couldn't find Tor's pluggable_transports folder (it comes with the Tor Expert Bundle).", 409, str(e)) from e
+    bridges = cfg.get("bridges", {}).get(mode)
+    plugin = cfg.get("pluggableTransports", {}).get("snowflake" if mode == "snowflake" else "lyrebird")
+    if not bridges or not plugin:
+        raise TorError("no_bridges", f"Your Tor bundle has no built-in {mode} bridges.", 409)
+    plugin = plugin.replace("${pt_path}", pt.as_posix() + "/").split(" ", 1)[1]
+    return [("UseBridges", "1"), ("ClientTransportPlugin", plugin)] + [("Bridge", b) for b in bridges]
+
+
+def set_bridges(q):
+    """hide tor from ur isp: connect thru built in bridges instead of normal tor relays.
+    saved to torguard-bridges.conf too so next time tor uses them from the very first connection."""
+    mode, slot = q.bridges(), q.slot()
+    with controller() as ctrl:
+        home = tor_home(ctrl)
+        conf = home / BRIDGES_FILE
+        old = conf.read_text(encoding="utf-8") if conf.exists() else None
+        old_lines = [tuple(line.split(" ", 1)) for line in (old or "").splitlines() if " " in line]
+        try:
+            if mode == "off":
+                ctrl.reset_conf("UseBridges", "Bridge", "ClientTransportPlugin")
+                conf.unlink(missing_ok=True)
+            else:
+                lines = bridge_lines(home, mode)
+                ctrl.set_options(lines)
+                conf.write_text("".join(f"{k} {v}\n" for k, v in lines), encoding="utf-8")
+                for circ in ctrl.get_circuits():  # stop using the old (non bridge) guards right away
+                    try:
+                        ctrl.close_circuit(circ.id)
+                    except Exception:
+                        pass
+            ports = slot_ports(ctrl, fresh=True)
+            deadline = time.time() + 120  # snowflake can take a while to connect
+            while True:
+                try:
+                    info = tor_trace(ports[slot])
+                    break
+                except Exception:
+                    if time.time() > deadline:
+                        raise
+                    time.sleep(3)
+            location = locate(ctrl, info)
+        except Exception as e:
+            if old_lines:  # put back whatever worked before
+                ctrl.set_options(old_lines)
+                conf.write_text(old, encoding="utf-8")
+            else:
+                ctrl.reset_conf("UseBridges", "Bridge", "ClientTransportPlugin")
+                conf.unlink(missing_ok=True)
+            if isinstance(e, TorError) and e.code == "no_bridges":
+                raise
+            err = explain(e)
+            raise TorError("bridges_failed", f"Couldn't connect through {mode} bridges, so the previous setting was kept.", err.status, err.detail) from e
+    return {"status": "success", "bridges": mode, "new_ip": info.get("ip", "unknown"), "location": location, "ports": ports}
 
 
 class Query:
@@ -270,8 +395,14 @@ class Query:
             raise TorError("bad_request", "country must be a two-letter code or 'any'", 400)
         return country
 
+    def bridges(self):
+        mode = self._get("mode", "off")
+        if mode not in BRIDGE_MODES:
+            raise TorError("bad_request", f"mode must be one of {', '.join(BRIDGE_MODES)}", 400)
+        return mode
 
-ROUTES = {"/status": status, "/rotate": rotate, "/ping": ping, "/exit": set_exit}
+
+ROUTES = {"/status": status, "/rotate": rotate, "/ping": ping, "/exit": set_exit, "/fastest": fastest, "/bridges": set_bridges}
 
 
 class RotationHandler(BaseHTTPRequestHandler):
@@ -308,6 +439,8 @@ if __name__ == "__main__":
     print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/rotate?slot=N&scope=site|all -> new circuit(s)")
     print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/ping?port=P&host=H  -> round trip through that circuit")
     print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/exit?country=de|any -> only use exits in one country")
+    print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/fastest?slot=N&host=H -> try a few circuits, keep the fastest")
+    print(f"    GET http://127.0.0.1:{ROTATOR_PORT}/bridges?mode=off|obfs4|snowflake|meek -> hide tor from ur isp")
 
     try:
         server = ThreadingHTTPServer(("127.0.0.1", ROTATOR_PORT), RotationHandler)

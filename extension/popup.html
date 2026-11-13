@@ -234,6 +234,17 @@
     .switch:checked { background: var(--accent); border-color: var(--accent); }
     .switch:checked::after { transform: translateX(14px); background: #fff; }
 
+    .ip-actions { display: flex; flex-direction: column; gap: 6px; }
+
+    /* --- leak test results --- */
+    .checks { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 7px; }
+    .checks li { display: grid; grid-template-columns: 16px 1fr; gap: 8px; font-size: 12px; line-height: 1.35; }
+    .checks .mark { font-weight: 700; text-align: center; color: var(--text-3); }
+    .checks .pass .mark { color: var(--accent); }
+    .checks .fail .mark { color: var(--danger); }
+    .checks b { font-weight: 600; color: var(--text); }
+    .checks small { display: block; color: var(--text-3); font-size: 11.5px; }
+
     .more { margin-top: 12px; }
     .more summary { width: fit-content; padding: 2px; cursor: pointer; color: var(--text-2); font-size: 12.5px; font-weight: 600; }
     .more summary:hover { color: var(--text); }
@@ -311,12 +322,19 @@
           <button class="link link-quiet" id="retryBtn" hidden>Try again</button>
         </div>
       </div>
-      <button class="icon-btn" id="rotateBtn" aria-label="Get new Tor IPs for every site" title="Get new Tor IPs for every site">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>
-          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>
-        </svg>
-      </button>
+      <div class="ip-actions">
+        <button class="icon-btn" id="rotateBtn" aria-label="Get new Tor IPs for every site" title="Get new Tor IPs for every site">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="fastestBtn" aria-label="Find the fastest circuit for this site" title="Find the fastest circuit for this site">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
     <div class="item item-col" id="siteRow" hidden>
@@ -330,6 +348,7 @@
         </div>
       </div>
       <p class="hint" id="siteHint"></p>
+      <p class="hint ok" id="trackerHint" hidden></p>
       <div class="links">
         <button class="link link-accent" id="siteReloadBtn" hidden>Reload to apply</button>
         <button class="link link-quiet" id="useDefaultBtn" hidden>Use default</button>
@@ -365,6 +384,13 @@
         </span>
         <input class="switch" type="checkbox" role="switch" id="forceHttps">
       </label>
+      <label class="item" for="blockTrackers">
+        <span class="item-body">
+          <span class="label-strong">Block trackers</span>
+          <span class="hint">Ad networks, analytics and tracking pixels on other sites.</span>
+        </span>
+        <input class="switch" type="checkbox" role="switch" id="blockTrackers">
+      </label>
       <div class="item">
         <span class="item-body">
           <label class="label-strong" for="exitCountry">Exit country</label>
@@ -390,6 +416,18 @@
       </div>
       <div class="item">
         <span class="item-body">
+          <label class="label-strong" for="bridges">Hide Tor from ISP</label>
+          <span class="hint" id="bridgesHint">Slower, but your network only sees ordinary encrypted traffic.</span>
+        </span>
+        <select class="select" id="bridges">
+          <option value="off">Off</option>
+          <option value="obfs4">obfs4</option>
+          <option value="snowflake">Snowflake</option>
+          <option value="meek">meek</option>
+        </select>
+      </div>
+      <div class="item">
+        <span class="item-body">
           <label class="label-strong" for="autoRotate">Auto new IPs</label>
           <span class="hint" id="autoHint">You may get logged out of sites.</span>
         </span>
@@ -402,6 +440,10 @@
       </div>
       <div class="item">
         <button class="btn btn-secondary btn-sm" id="rotateAllBtn">New IPs for every site</button>
+      </div>
+      <div class="item item-col">
+        <button class="btn btn-secondary btn-sm" id="leakBtn">Run leak test on this page</button>
+        <ul class="checks" id="leakResults" aria-live="polite" hidden></ul>
       </div>
     </div>
   </details>

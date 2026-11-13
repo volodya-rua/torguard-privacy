@@ -11,3 +11,7 @@ __pycache__/
 # windows junk
 Thumbs.db
 desktop.ini
+
+# made on ur machine
+host/com.torguard.host.json
+torguard-bridges.conf

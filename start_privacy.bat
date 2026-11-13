@@ -71,6 +71,7 @@ if errorlevel 1 (
     rem torrc wants windows paths with doubled backslashes in quotes, C:/ makes tor whine
     set "TOR_DATA_ESC=!TOR_DATA:\=\\!"
     set "GEOIP_ESC=!TOR_HOME:\=\\!\\data"
+    set "BRIDGES_ESC=!TOR_HOME:\=\\!\\torguard-bridges.conf"
     (
         echo SocksPort 127.0.0.1:9050
         echo ControlPort 127.0.0.1:9051
@@ -80,6 +81,8 @@ if errorlevel 1 (
         rem country data for the exit country setting - the tor expert bundle's data folder
         if exist "%TOR_HOME%\data\geoip" echo GeoIPFile "!GEOIP_ESC!\\geoip"
         if exist "%TOR_HOME%\data\geoip6" echo GeoIPv6File "!GEOIP_ESC!\\geoip6"
+        rem bridges u turned on in the popup, so tor uses them from the very first connection
+        if exist "%TOR_HOME%\torguard-bridges.conf" echo %%include "!BRIDGES_ESC!"
     ) > "%TORRC%"
     
     start "TorService" /B "%TOR_EXE%" -f "%TORRC%"

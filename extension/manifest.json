@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "TorGuard Privacy",
-  "version": "1.3.0",
-  "description": "Routes browser traffic through Tor with a circuit per site, and blocks fingerprinting, WebRTC leaks and tracking. Optionally incognito only.",
-  "permissions": ["proxy", "privacy", "storage", "scripting", "declarativeNetRequest", "alarms", "cookies", "webRequest"],
+  "version": "1.4.0",
+  "description": "Routes browser traffic through Tor with a circuit per site, and blocks fingerprinting, trackers and WebRTC leaks. Optionally incognito only.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0uu1ZYkAdtiYFMCXxRSU9dD7ZM2hIcK3y07xtc8dVORU7581Yrxo4EFvBWOieEKT1mcQLMrEk5WV8EtR/jjv9ep5zTuJoIMO4PXjn8gY+MrmJq5Yodff1TbN2a97GqBsIqpUVaDTWfIcEnB3kGijfZ6iOvZ4aYPC92SIqm+36CP0cW3TyAymHKPvL1leWGYu8VsDHyTvCYUnQ/k7Npq8QKLEWeezc6wYpAooqma1TcpA61O5xzWIe0BjDUpRu4ILBz0kXVXVDyBP6/SPm8oGn7KsWNLvijL61FBzw6oz2mXmdXXr3wz6h1F7pfEadNe8aOE1+VCVw3rjg0W/xAaHaQIDAQAB",
+  "permissions": ["proxy", "privacy", "storage", "scripting", "declarativeNetRequest", "declarativeNetRequestFeedback", "alarms", "cookies", "webRequest", "nativeMessaging"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

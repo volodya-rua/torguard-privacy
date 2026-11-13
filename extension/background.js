@@ -10,7 +10,7 @@
 //   exitCountry    - the popup sends this to the rotator ('any' or a country code)
 // low = tor + leak stuff. medium = also fake clock/lang/hardware. high = also canvas/webgl/audio
 // noise + workers. off = that site goes direct, no tor
-importScripts('site.js');
+importScripts('site.js', 'trackers.js');
 
 const ROTATOR_API = 'http://127.0.0.1:8222';
 const LEVELS = ['off', 'low', 'medium', 'high'];
@@ -52,7 +52,8 @@ const SCRIPT = { matches: ['<all_urls>'], runAt: 'document_start', allFrames: tr
 
 const ALL_TYPES = ['main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font', 'object', 'xmlhttprequest',
   'ping', 'csp_report', 'media', 'websocket', 'webtransport', 'webbundle', 'other'];
-const RULE = { HEADERS: 1, HTTPS: 2, LOCAL_HTTP: 3 };
+const RULE = { HEADERS: 1, HTTPS: 2, LOCAL_HTTP: 3, TRACKERS: 4 };
+const TRACKER_URL_RULES = TRACKER_URLS.map((urlFilter, i) => ({ id: 10 + i, urlFilter })); // ids 10+
 // medium + high: everyone says en-US and no detailed device/os/version hints
 const HEADER_ACTION = {
   type: 'modifyHeaders',
@@ -65,8 +66,8 @@ const HEADER_ACTION = {
 
 async function readState() {
   const { enabled = false, ports = [], lastError = null } = await chrome.storage.session.get(['enabled', 'ports', 'lastError']);
-  const local = await chrome.storage.local.get(['incognitoOnly', 'defaultLevel', 'levels', 'forceHttps', 'autoRotate']);
-  const { incognitoOnly = true, defaultLevel = 'high', levels = {}, forceHttps = true, autoRotate = 0 } = local;
+  const local = await chrome.storage.local.get(['incognitoOnly', 'defaultLevel', 'levels', 'forceHttps', 'autoRotate', 'blockTrackers']);
+  const { incognitoOnly = true, defaultLevel = 'high', levels = {}, forceHttps = true, autoRotate = 0, blockTrackers = true } = local;
   return {
     enabled,
     lastError,
@@ -77,6 +78,7 @@ async function readState() {
     // skip anything broken instead of breaking protection for every site
     levels: Object.fromEntries(Object.entries(levels || {}).filter(([site, lvl]) => LEVELS.includes(lvl) && /^[a-z0-9-]+(\.[a-z0-9-]+)*$/i.test(site))),
     forceHttps: forceHttps !== false,
+    blockTrackers: blockTrackers !== false,
     autoRotate: AUTO_ROTATE_MINUTES.includes(autoRotate) ? autoRotate : 0,
   };
 }
@@ -156,8 +158,15 @@ async function applyRules(state) {
       // router, nas etc on ur local network dont have https, leave them alone
       addRules.push({ id: RULE.LOCAL_HTTP, priority: 2, action: { type: 'allow' }, condition: { regexFilter: `^http://${PRIVATE_IP}`, resourceTypes: ALL_TYPES } });
     }
+    if (state.blockTrackers) {
+      // only when loaded on OTHER sites, and never on sites u set to Off
+      const off = offSites(state);
+      const condition = { domainType: 'thirdParty', resourceTypes: ALL_TYPES.filter((t) => t !== 'main_frame'), ...tabScope, ...(off.length && { excludedInitiatorDomains: off }) };
+      addRules.push({ id: RULE.TRACKERS, priority: 1, action: { type: 'block' }, condition: { ...condition, requestDomains: TRACKER_DOMAINS } });
+      for (const { id, urlFilter } of TRACKER_URL_RULES) addRules.push({ id, priority: 1, action: { type: 'block' }, condition: { ...condition, urlFilter } });
+    }
   }
-  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: Object.values(RULE), addRules });
+  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [...Object.values(RULE), ...TRACKER_URL_RULES.map((r) => r.id)], addRules });
 }
 
 async function applyAlarm({ enabled, autoRotate }) {
@@ -253,12 +262,28 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   for (const key of blobWorkers.keys()) if (key.startsWith(`${tabId}/`)) blobWorkers.delete(key);
 });
 
-const STATUS_KEYS = ['lastError', 'autoRotateResult']; // stuff this worker writes, not settings
+// native host (install_host.bat): turning protection on/off starts/stops tor + the rotator so u dont
+// need the .bat window. if its not installed this just fails and u use start_privacy.bat like before
+async function host(cmd) {
+  let status;
+  try {
+    status = { available: true, cmd, ...(await chrome.runtime.sendNativeMessage('com.torguard.host', { cmd })) };
+  } catch (e) {
+    status = { available: false, cmd, ok: false, message: e?.message || String(e) };
+  }
+  await chrome.storage.session.set({ hostStatus: { ...status, at: Date.now() } });
+}
+
+const STATUS_KEYS = ['lastError', 'autoRotateResult', 'hostStatus']; // stuff this worker writes, not settings
 chrome.storage.onChanged.addListener((changes) => {
+  if (changes.enabled && changes.enabled.newValue !== changes.enabled.oldValue) host(changes.enabled.newValue ? 'start' : 'stop');
   if (Object.keys(changes).some((key) => !STATUS_KEYS.includes(key))) sync();
   else if ('lastError' in changes) paintBadges();
 });
-chrome.runtime.onStartup.addListener(sync); // chrome keeps proxy settings after a restart, reset them
+chrome.runtime.onStartup.addListener(() => {
+  sync(); // chrome keeps proxy settings after a restart, reset them
+  host('stop'); // protection starts off, so stop a tor the popup left running last time
+});
 chrome.tabs.onCreated.addListener(syncRules);
 chrome.tabs.onRemoved.addListener(syncRules);
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => { if (change.url) paintBadges(tab); });
