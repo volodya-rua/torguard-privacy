@@ -313,7 +313,7 @@ function paintBlocked() {
 
 // the rotator owns the per site tor ports, hand them to the background when they change
 async function usePorts(ports) {
-  if (!Array.isArray(ports)) return; // old rotator that doesnt give ports
+  if (!Array.isArray(ports)) return; // rotator didnt send ports, nothing to hand over
   if (JSON.stringify(S.ports) !== JSON.stringify(ports)) await chrome.storage.session.set({ ports });
 }
 

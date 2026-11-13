@@ -2,7 +2,7 @@
 
 chrome extension + a couple scripts that push ur browser thru tor, give every site its own ip and fuck with fingerprinting so sites cant follow u around.
 
-it can do it only for incognito windows (default) or for everything. it starts OFF every time chrome starts cuz i got sick of it turning itself on by itself.
+it can do it only for incognito windows (default) or for everything. it starts OFF every time chrome starts, u turn it on when u actually want it.
 
 <p>
   <img src="screenshots/popup.png" width="300" alt="popup">
@@ -14,7 +14,7 @@ it can do it only for incognito windows (default) or for everything. it starts O
 
 - **tor for everything** (or just incognito). theres no direct fallback, so if tor dies pages just fail instead of leaking ur real ip
 - **different ip per site.** every site gets its own tor circuit so google and some random shop dont see the same ip. subdomains stay together so logins dont break
-- **new ip button that actually works.** the old one said "ip changed" and it fucking didnt (chrome kept using the old connection). now it swaps the tor ports so chrome has to reconnect. u can do just the site ur on or every site
+- **new ip button.** swaps the site's tor port so chrome has to reconnect and the page really sees a new ip (just telling tor "new circuit" doesnt work, chrome keeps the open connection). u can do just the site ur on or every site
 - **security levels per site.** off / low / med / high, remembered per site, plus a default for everything else
 - **live ping** for the site's circuit, measured without even touching the site
 - **blocked page detection.** if a site throws a cloudflare "sorry, you have been blocked" at u, the popup notices and gives u buttons for a new ip or turning tor off for that site
@@ -26,7 +26,7 @@ it can do it only for incognito windows (default) or for everything. it starts O
 - **hide tor from ur isp.** bridges (obfs4 / snowflake / meek) so ur wifi or isp just sees normal encrypted traffic instead of "this guy uses tor". uses the built in bridges from ur tor bundle
 - **fastest ip button** (the ⚡ one). tries 4 circuits for the site, pings them, keeps the quickest
 - **leak test.** one click checks tor, dns, webrtc, fingerprint, https and trackers on the page ur on
-- **one click start** (optional). run `install_host.bat` once and the turn on button starts tor itself, no more leaving the .bat window open. see below
+- **one click start** (optional). run `install_host.bat` once and the turn on button starts tor itself, so u dont need the .bat window open. see below
 - toolbar badge shows the level for each tab (H / M / L / OFF, or ! if something broke)
 
 <img src="screenshots/leaktest.png" width="300" alt="leak test">
@@ -41,24 +41,6 @@ it can do it only for incognito windows (default) or for everything. it starts O
 | **low** | tor + webrtc/dns leak protection + https. pages see ur real device stuff. least likely to get blocked |
 | **med** | also fakes the clock (UTC), language (en-US), cpu, memory, gpu and os version |
 | **high** | also adds noise to canvas / webgl / audio fingerprints (changes every load), inside web workers too. this is the default |
-
-## before vs after
-
-tested the old version of this against the new one, same chrome setup, both thru tor. went from 5/21 to 21/21, and honestly 4 of the old 5 were by accident lol
-
-| | old | new |
-|---|---|---|
-| sites see a tor ip | only if Script.py's bridge was running (it crashed so nothing loaded) | yes |
-| different ip per site | no, everything shared one | yes |
-| new ip button changes what the page sees | no | yes |
-| webrtc leak | "blocked" by breaking webrtc on every site | blocked, calls still work |
-| timezone | ur real one | UTC |
-| language header | ur real one | en-US |
-| cpu cores / gpu | ur real ones | 4 cores, Intel UHD 620 |
-| canvas + audio fingerprint | same every load | different every load |
-| exact os + chrome build | leaked | hidden |
-| 3rd party cookies, link pings | allowed | off |
-| same fingerprint across reloads / sites | yes | no |
 
 ## setup (windows)
 
@@ -124,7 +106,7 @@ being real here, its still chrome. it cant hide ur installed fonts or window siz
 
 ## Script.py
 
-old launcher that runs any app thru tor (sets the windows proxy for electron apps). `start_privacy.bat "C:\path\to\app.exe"` starts tor + rotator and launches the app thru it. without an arg the bat just runs tor + the rotator.
+launcher that runs any app thru tor (sets the windows proxy for electron apps). `start_privacy.bat "C:\path\to\app.exe"` starts tor + rotator and launches the app thru it. without an arg the bat just runs tor + the rotator.
 
 ## files
 

@@ -1,6 +1,6 @@
 // torguard background worker
 // on/off + the rotator ports are in storage.session so it always starts OFF when chrome starts
-// or when u re-enable the extension (it used to just turn itself on, annoying af)
+// or when u re-enable the extension, u always turn it on urself
 // settings in storage.local:
 //   incognitoOnly  - only touch incognito windows
 //   defaultLevel   - low / medium / high for sites u havent set
@@ -263,7 +263,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // native host (install_host.bat): turning protection on/off starts/stops tor + the rotator so u dont
-// need the .bat window. if its not installed this just fails and u use start_privacy.bat like before
+// need the .bat window. if its not installed this just fails and u use start_privacy.bat instead
 async function host(cmd) {
   let status;
   try {

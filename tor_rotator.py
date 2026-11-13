@@ -7,8 +7,8 @@ gives every site its own tor circuit and lets the extension get fresh ones.
 tor never lets streams from different SocksPorts share a circuit, so this keeps SLOTS extra
 SocksPorts open and the extension sends each site to one of them. rotating swaps in brand new
 port numbers, so chrome (it pools connections per proxy port) and tor (new isolation groups)
-both have to start over and the ip actually changes. the old version just sent NEWNYM and chrome
-kept using its old connection, so the ip never changed lol
+both have to start over and the ip actually changes. just sending NEWNYM isnt enough, chrome keeps
+using the connection it already has open so the ip wouldnt change lol
 
 errors come back as {"status": "error", "code": ..., "message": ..., "detail": ...} so the
 extension can say what's wrong and what to do
