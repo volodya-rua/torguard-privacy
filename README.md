@@ -97,3 +97,7 @@ tor_rotator.py     local api for per site ips, new ips, ping, exit country
 start_privacy.bat  starts tor + rotator (and Script.py if u give it an app)
 Script.py          run other apps thru tor
 ```
+
+## license
+
+MIT, do whatever u want with it. see [LICENSE](LICENSE)
