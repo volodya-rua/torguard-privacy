@@ -1,0 +1,99 @@
+# torguard-privacy
+
+chrome extension + a couple scripts that push ur browser thru tor, give every site its own ip and fuck with fingerprinting so sites cant follow u around.
+
+it can do it only for incognito windows (default) or for everything. it starts OFF every time chrome starts cuz i got sick of it turning itself on by itself.
+
+<p>
+  <img src="screenshots/popup.png" width="300" alt="popup">
+  &nbsp;&nbsp;
+  <img src="screenshots/settings.png" width="300" alt="popup with more settings open">
+</p>
+
+## what it does
+
+- **tor for everything** (or just incognito). theres no direct fallback, so if tor dies pages just fail instead of leaking ur real ip
+- **different ip per site.** every site gets its own tor circuit so google and some random shop dont see the same ip. subdomains stay together so logins dont break
+- **new ip button that actually works.** the old one said "ip changed" and it fucking didnt (chrome kept using the old connection). now it swaps the tor ports so chrome has to reconnect. u can do just the site ur on or every site
+- **security levels per site.** off / low / med / high, remembered per site, plus a default for everything else
+- **live ping** for the site's circuit, measured without even touching the site
+- **blocked page detection.** if a site throws a cloudflare "sorry, you have been blocked" at u, the popup notices and gives u buttons for a new ip or turning tor off for that site
+- **force https** so a sketchy exit node cant read or mess with pages
+- **exit country** if u want all exits in one country (needs tor's geoip files, see setup)
+- **auto new ips** every 10 / 30 / 60 min
+- **forget this site.** nukes its cookies (even the httponly login ones) and storage
+- toolbar badge shows the level for each tab (H / M / L / OFF, or ! if something broke)
+
+### levels
+
+| level | what u get |
+|---|---|
+| **off** | no tor for that site at all, it sees ur real ip. for sites that block tor |
+| **low** | tor + webrtc/dns leak protection + https. pages see ur real device stuff. least likely to get blocked |
+| **med** | also fakes the clock (UTC), language (en-US), cpu, memory, gpu and os version |
+| **high** | also adds noise to canvas / webgl / audio fingerprints (changes every load), inside web workers too. this is the default |
+
+## before vs after
+
+tested the old version of this against the new one, same chrome setup, both thru tor. went from 5/21 to 21/21, and honestly 4 of the old 5 were by accident lol
+
+| | old | new |
+|---|---|---|
+| sites see a tor ip | only if Script.py's bridge was running (it crashed so nothing loaded) | yes |
+| different ip per site | no, everything shared one | yes |
+| new ip button changes what the page sees | no | yes |
+| webrtc leak | "blocked" by breaking webrtc on every site | blocked, calls still work |
+| timezone | ur real one | UTC |
+| language header | ur real one | en-US |
+| cpu cores / gpu | ur real ones | 4 cores, Intel UHD 620 |
+| canvas + audio fingerprint | same every load | different every load |
+| exact os + chrome build | leaked | hidden |
+| 3rd party cookies, link pings | allowed | off |
+| same fingerprint across reloads / sites | yes | no |
+
+## setup (windows)
+
+1. get the **tor expert bundle** from https://www.torproject.org/download/tor/ and extract it into this folder so u have `tor\tor.exe` and `data\geoip` (or set `TOR_HOME` to wherever ur tor is)
+2. python stuff: `pip install -r requirements.txt`
+3. run `start_privacy.bat` and leave it open. it starts tor + the rotator, press any key in it to stop everything
+4. chrome → `chrome://extensions` → turn on developer mode → **load unpacked** → pick the `extension` folder
+5. on the extension's details page turn on **allow in incognito** or incognito mode does nothing
+6. click the icon → turn on protection
+
+## how the per site ip thing works
+
+tor never lets connections from different SocksPorts share a circuit. so `tor_rotator.py` opens 16 extra SocksPorts and the extension sends each site to one of them (it hashes the domain). new ip = swap in fresh port numbers, so chrome cant reuse its old connections and tor has to build new circuits. if a port dies (like tor restarted) it falls back to 9050, never to a direct connection.
+
+the rotator is a tiny local api on `127.0.0.1:8222`:
+
+```
+/status?slot=N                 exit ip a site on slot N sees
+/rotate?slot=N&scope=site|all  new circuit for one site or all of them
+/ping?port=P&host=H            round trip thru that circuit
+/exit?country=de|any           only use exits in one country
+```
+
+## if a site blocks u
+
+thats the site's firewall blocking tor, mostly cloudflare. nothing on ur end can make a site that blocks all of tor accept tor, period. what u can do:
+
+- try a new ip (works when they only block some exits)
+- drop that site to low (if a bot check was freaking out over the fingerprint stuff)
+- set it to off. always works but then that site sees ur real ip
+
+## what it cant do
+
+being real here, its still chrome. it cant hide ur installed fonts or window size, shared/service workers arent covered, and sites with a strict CSP get their workers unprotected (otherwise theyd break). if u actually need to be anonymous use **tor browser**, this aint that. this is for making tracking a pain in the ass in normal chrome.
+
+## Script.py
+
+old launcher that runs any app thru tor (sets the windows proxy for electron apps). `start_privacy.bat "C:\path\to\app.exe"` starts tor + rotator and launches the app thru it. without an arg the bat just runs tor + the rotator.
+
+## files
+
+```
+extension/         the chrome extension, load this folder
+tor_rotator.py     local api for per site ips, new ips, ping, exit country
+start_privacy.bat  starts tor + rotator (and Script.py if u give it an app)
+Script.py          run other apps thru tor
+```

@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>TorGuard Privacy</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #141615;
+      --surface: #1b1e1d;
+      --surface-2: #252927;
+      --border: #2d3230;
+      --border-strong: #3a403d;
+      --text: #ecefed;
+      --text-2: #b0b8b4;
+      --text-3: #8d9591;
+      --accent: #00cc66;
+      --accent-hover: #12db76;
+      --accent-ink: #03140b;
+      --warn: #f5b04c;
+      --danger: #ff7070;
+      --focus: #74e8ad;
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    * { box-sizing: border-box; }
+    /* taller than chrome's 600px popup limit (like with more settings open): only scroll down, thin dark bar */
+    html { overflow-x: hidden; scrollbar-width: thin; scrollbar-color: var(--border-strong) var(--bg); }
+    ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--text); }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+    body {
+      width: 312px;
+      margin: 0;
+      padding: 14px 16px 16px;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    p { margin: 0; }
+    svg { display: block; }
+    [hidden] { display: none !important; }
+
+    .brand { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+
+    /* --- status panel, the one place that says if ur protected --- */
+    .state {
+      --tone: var(--text-3);
+      padding: 14px;
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--tone) 7%, var(--surface));
+      border: 1px solid color-mix(in srgb, var(--tone) 26%, var(--border));
+      transition: background-color 200ms var(--ease-out), border-color 200ms var(--ease-out);
+    }
+    .state[data-state="on"] { --tone: var(--accent); }
+    .state[data-state="warn"] { --tone: var(--warn); }
+
+    .state-head { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
+    .state-icon {
+      flex: none;
+      display: grid;
+      place-items: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      color: var(--tone);
+      background: color-mix(in srgb, var(--tone) 14%, transparent);
+      transition: color 200ms var(--ease-out), background-color 200ms var(--ease-out);
+    }
+    .state-icon .mark { display: none; }
+    .state[data-state="on"] .mark-on,
+    .state[data-state="warn"] .mark-warn { display: inline; }
+
+    .state-title { font-size: 17px; font-weight: 650; line-height: 1.25; letter-spacing: -0.01em; }
+    .state[data-state="on"] .state-title { color: var(--accent); }
+    .state[data-state="warn"] .state-title { color: var(--warn); }
+    .state-detail { margin-top: 2px; color: var(--text-2); font-size: 12.5px; text-wrap: pretty; }
+    .state-error { margin-top: 6px; color: var(--danger); font-size: 12px; text-wrap: pretty; }
+
+    .link {
+      margin-top: 6px;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--warn);
+      font: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      text-decoration-thickness: 1px;
+      cursor: pointer;
+    }
+    .link:hover { text-decoration-thickness: 2px; }
+    .link-accent { color: var(--accent); }
+    .link-quiet { color: var(--text-2); }
+    .links { display: flex; gap: 14px; }
+
+    .btn {
+      width: 100%;
+      height: 38px;
+      border-radius: 9px;
+      border: 1px solid transparent;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), transform 100ms var(--ease-out);
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+    .btn-primary { background: var(--accent); color: var(--accent-ink); }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-secondary { background: var(--surface-2); border-color: var(--border-strong); color: var(--text); }
+    .btn-secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--surface-2) 80%, white); }
+    .btn-sm { height: 32px; font-size: 12.5px; }
+
+    /* --- "this site is blocking tor" --- */
+    .notice {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+      border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border));
+    }
+    .notice-title { color: var(--warn); font-weight: 650; }
+    .notice-body { margin-top: 2px; color: var(--text-2); font-size: 12px; text-wrap: pretty; }
+    .notice-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+
+    /* --- settings list --- */
+    .list { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .item { display: flex; align-items: center; gap: 12px; padding: 11px 14px; }
+    .item + .item { border-top: 1px solid var(--border); }
+    .item-col { flex-direction: column; align-items: stretch; gap: 0; }
+    .item-body { flex: 1; min-width: 0; }
+    .row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .label { color: var(--text-3); font-size: 12px; }
+    .label-strong { font-weight: 550; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .hint { display: block; margin-top: 2px; color: var(--text-3); font-size: 12px; text-wrap: pretty; }
+    .hint.ok { color: var(--accent); }
+    .hint.err { color: var(--danger); }
+    .hint.warn { color: var(--warn); }
+
+    .ip { display: flex; align-items: baseline; gap: 6px; min-height: 20px; margin-top: 1px; }
+    .ip-value { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .ip-meta { color: var(--text-3); font-size: 12px; font-weight: 600; }
+    #ipBox[data-state="offline"] .ip-value,
+    #ipBox[data-state="down"] .ip-value,
+    #ipBox[data-state="idle"] .ip-value { color: var(--text-2); font-weight: 500; }
+    #ipBox[data-state="loading"] .ip-value {
+      width: 116px;
+      height: 14px;
+      margin-top: 3px;
+      border-radius: 4px;
+      background: var(--surface-2);
+      animation: pulse 1.1s ease-in-out infinite alternate;
+    }
+    @keyframes pulse { from { opacity: 1; } to { opacity: 0.45; } }
+
+    /* --- live ping meter --- */
+    .ping { --tone: var(--text-3); display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--text-2); font-size: 12px; }
+    .ping[data-quality="good"] { --tone: var(--accent); }
+    .ping[data-quality="ok"] { --tone: var(--warn); }
+    .ping[data-quality="slow"] { --tone: var(--danger); }
+    .ping-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tone); flex: none; }
+    .ping-ms { min-width: 52px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+    .spark { color: var(--tone); flex: none; }
+    .ping-label { color: var(--text-3); }
+
+    .icon-btn {
+      flex: none;
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      border: 1px solid var(--border-strong);
+      background: var(--surface-2);
+      color: var(--text);
+      cursor: pointer;
+      transition: background-color 150ms var(--ease-out), opacity 150ms var(--ease-out);
+    }
+    .icon-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--surface-2) 80%, white); }
+    .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .icon-btn.busy svg { animation: spin 0.9s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* --- level picker: normal radios styled like a segmented control --- */
+    .seg { display: inline-flex; flex: none; padding: 2px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border-strong); }
+    .seg label { position: relative; cursor: pointer; }
+    .seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+    .seg span {
+      display: block;
+      min-width: 38px;
+      padding: 3px 7px;
+      border-radius: 6px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-2);
+      transition: background-color 150ms var(--ease-out), color 150ms var(--ease-out);
+    }
+    .seg label:hover span { color: var(--text); }
+    .seg input:checked + span { background: var(--accent); color: var(--accent-ink); }
+    .seg input[value="off"]:checked + span { background: var(--warn); color: #241503; }
+    .seg input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 1px; }
+    .default-tag { margin-left: 4px; color: var(--text-3); font-weight: 400; }
+
+    label.item { cursor: pointer; }
+    .switch {
+      appearance: none;
+      flex: none;
+      position: relative;
+      width: 34px;
+      height: 20px;
+      margin: 0;
+      border-radius: 999px;
+      border: 1px solid var(--border-strong);
+      background: var(--surface-2);
+      cursor: pointer;
+      transition: background-color 180ms var(--ease-out), border-color 180ms var(--ease-out);
+    }
+    .switch::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--text-2);
+      transition: transform 180ms var(--ease-out), background-color 180ms var(--ease-out);
+    }
+    .switch:checked { background: var(--accent); border-color: var(--accent); }
+    .switch:checked::after { transform: translateX(14px); background: #fff; }
+
+    .more { margin-top: 12px; }
+    .more summary { width: fit-content; padding: 2px; cursor: pointer; color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+    .more summary:hover { color: var(--text); }
+    .more summary::marker { color: var(--text-3); }
+    .more .list { margin-top: 8px; }
+    .select {
+      flex: none;
+      max-width: 124px;
+      padding: 4px 6px;
+      border-radius: 7px;
+      border: 1px solid var(--border-strong);
+      background: var(--surface-2);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .footer { margin-top: 12px; color: var(--text-3); font-size: 12px; text-align: center; text-wrap: balance; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::after { transition: none !important; }
+      .icon-btn.busy svg, #ipBox[data-state="loading"] .ip-value { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <p class="brand">TorGuard Privacy</p>
+
+  <section class="state" id="state" data-state="off">
+    <div class="state-head">
+      <div class="state-icon" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>
+          <path class="mark mark-on" d="m9 12 2 2 4-4"/>
+          <path class="mark mark-warn" d="M12 8v4M12 16h.01"/>
+        </svg>
+      </div>
+      <div aria-live="polite">
+        <p class="state-title" id="statusText">Checking…</p>
+        <p class="state-detail" id="statusDetail"></p>
+        <p class="state-error" id="stateError" role="alert" hidden></p>
+        <button class="link" id="fixBtn" hidden>Open extension settings</button>
+      </div>
+    </div>
+    <button class="btn btn-primary" id="toggleBtn">Turn on protection</button>
+  </section>
+
+  <section class="notice" id="blocked" hidden aria-live="polite">
+    <p class="notice-title">This site is blocking Tor</p>
+    <p class="notice-body" id="blockedBody"></p>
+    <div class="notice-actions">
+      <button class="btn btn-secondary btn-sm" id="blockedRotate">Try a new IP</button>
+      <button class="btn btn-secondary btn-sm" id="blockedDirect">Turn Tor off here</button>
+    </div>
+  </section>
+
+  <div class="list">
+    <div class="item" id="ipBox" data-state="loading">
+      <div class="item-body">
+        <p class="label" id="ipLabel">Tor exit IP</p>
+        <p class="ip"><span class="ip-value" id="ipValue"></span><span class="ip-meta" id="ipMeta"></span></p>
+        <div class="ping" id="ping" hidden title="Round trip through this site's Tor circuit, measured every 2 seconds">
+          <span class="ping-dot" aria-hidden="true"></span>
+          <span class="ping-ms" id="pingMs">…</span>
+          <svg class="spark" width="72" height="18" viewBox="0 0 72 18" aria-hidden="true">
+            <polyline id="spark" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" points=""/>
+          </svg>
+          <span class="ping-label" id="pingLabel"></span>
+        </div>
+        <p class="hint" id="ipHint" role="status" hidden></p>
+        <div class="links">
+          <button class="link link-accent" id="reloadBtn" hidden>Reload page</button>
+          <button class="link link-quiet" id="retryBtn" hidden>Try again</button>
+        </div>
+      </div>
+      <button class="icon-btn" id="rotateBtn" aria-label="Get new Tor IPs for every site" title="Get new Tor IPs for every site">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="item item-col" id="siteRow" hidden>
+      <div class="row-head">
+        <span class="label-strong" id="siteName"></span>
+        <div class="seg" role="radiogroup" aria-label="Security level for this site">
+          <label><input type="radio" name="siteLevel" value="off"><span>Off</span></label>
+          <label><input type="radio" name="siteLevel" value="low"><span>Low</span></label>
+          <label><input type="radio" name="siteLevel" value="medium"><span>Med</span></label>
+          <label><input type="radio" name="siteLevel" value="high"><span>High</span></label>
+        </div>
+      </div>
+      <p class="hint" id="siteHint"></p>
+      <div class="links">
+        <button class="link link-accent" id="siteReloadBtn" hidden>Reload to apply</button>
+        <button class="link link-quiet" id="useDefaultBtn" hidden>Use default</button>
+        <button class="link link-quiet" id="forgetBtn" title="Delete this site's cookies and storage, then reload">Forget this site</button>
+      </div>
+    </div>
+
+    <div class="item">
+      <span class="item-body"><span class="label-strong" title="Used for every site you haven't set yourself">Default level</span></span>
+      <div class="seg" role="radiogroup" aria-label="Default security level">
+        <label><input type="radio" name="defaultLevel" value="low"><span>Low</span></label>
+        <label><input type="radio" name="defaultLevel" value="medium"><span>Med</span></label>
+        <label><input type="radio" name="defaultLevel" value="high"><span>High</span></label>
+      </div>
+    </div>
+
+    <label class="item" for="incognitoOnly">
+      <span class="item-body">
+        <span class="label-strong">Incognito windows only</span>
+        <span class="hint" id="scopeHint"></span>
+      </span>
+      <input class="switch" type="checkbox" role="switch" id="incognitoOnly">
+    </label>
+  </div>
+
+  <details class="more">
+    <summary>More settings</summary>
+    <div class="list">
+      <label class="item" for="forceHttps">
+        <span class="item-body">
+          <span class="label-strong">Force HTTPS</span>
+          <span class="hint">Stops Tor exit relays from reading or changing pages.</span>
+        </span>
+        <input class="switch" type="checkbox" role="switch" id="forceHttps">
+      </label>
+      <div class="item">
+        <span class="item-body">
+          <label class="label-strong" for="exitCountry">Exit country</label>
+          <span class="hint" id="exitHint">Fewer exits make you easier to single out.</span>
+        </span>
+        <select class="select" id="exitCountry">
+          <option value="any">Any</option>
+          <option value="at">Austria</option>
+          <option value="ca">Canada</option>
+          <option value="fi">Finland</option>
+          <option value="fr">France</option>
+          <option value="de">Germany</option>
+          <option value="is">Iceland</option>
+          <option value="lu">Luxembourg</option>
+          <option value="nl">Netherlands</option>
+          <option value="no">Norway</option>
+          <option value="ro">Romania</option>
+          <option value="se">Sweden</option>
+          <option value="ch">Switzerland</option>
+          <option value="gb">United Kingdom</option>
+          <option value="us">United States</option>
+        </select>
+      </div>
+      <div class="item">
+        <span class="item-body">
+          <label class="label-strong" for="autoRotate">Auto new IPs</label>
+          <span class="hint" id="autoHint">You may get logged out of sites.</span>
+        </span>
+        <select class="select" id="autoRotate">
+          <option value="0">Off</option>
+          <option value="10">Every 10 min</option>
+          <option value="30">Every 30 min</option>
+          <option value="60">Every hour</option>
+        </select>
+      </div>
+      <div class="item">
+        <button class="btn btn-secondary btn-sm" id="rotateAllBtn">New IPs for every site</button>
+      </div>
+    </div>
+  </details>
+
+  <p class="footer">Starts off each time Chrome starts</p>
+
+  <script src="site.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

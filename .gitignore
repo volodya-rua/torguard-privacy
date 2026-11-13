@@ -1,0 +1,13 @@
+# tor stuff (get it from torproject.org, dont commit binaries)
+tor/
+data/
+tor_data/
+torrc
+
+# python
+__pycache__/
+*.pyc
+
+# windows junk
+Thumbs.db
+desktop.ini
