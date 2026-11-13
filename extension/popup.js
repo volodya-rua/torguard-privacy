@@ -69,6 +69,9 @@ let ip = { state: 'loading' };
 let note = null; // rotate result that stays until u do something else
 let busy = false;
 let blocked = false;
+// one exit country switch at a time. otherwise "put the saved country back" (refreshIP) could run
+// during ur switch and tor ends up in a different country than the dropdown says
+let exitBusy = false;
 let pings = []; // last 20 pings in ms (null = no reply)
 let pingError = null;
 let localError = '';
@@ -158,7 +161,8 @@ function paintSettings() {
     : !r ? 'First change in a few minutes.'
     : r.ok ? `Last change ${ago(r.at)}.` : `Last try failed (${ago(r.at)}): ${r.message}`;
   autoHint.className = `hint${S.autoRotate && r && !r.ok ? ' err' : ''}`;
-  if (document.activeElement !== exitSelect) exitSelect.value = S.exitCountry;
+  // while a switch runs the saved country is still the old one, dont snap the dropdown back to it
+  if (document.activeElement !== exitSelect && !exitBusy) exitSelect.value = S.exitCountry;
   if (tor.geoip === false) {
     exitHint.textContent = 'Your Tor is missing its country data (GeoIP file).';
     exitHint.className = 'hint warn';
@@ -354,6 +358,9 @@ async function refreshIP(quiet = false) {
 }
 
 async function setExit(country) {
+  if (exitBusy) return;
+  exitBusy = true;
+  exitSelect.value = country;
   exitSelect.disabled = true;
   exitHint.dataset.message = '1';
   exitHint.textContent = country === 'any' ? 'Going back to any country…' : 'Switching exits…';
@@ -362,9 +369,11 @@ async function setExit(country) {
     const data = await getJSON(`/exit?country=${country}&slot=${slot}`, 90000);
     await usePorts(data.ports);
     await save('local', { exitCountry: country });
+    S.exitCountry = country;
     ip = { state: 'ok', value: data.new_ip, location: data.location };
     tor.exitCountry = country;
-    exitHint.textContent = country === 'any' ? 'Tor picks exits anywhere again.' : `Exits now in ${exitSelect.selectedOptions[0].text}. Reload pages to use them.`;
+    const name = [...exitSelect.options].find((o) => o.value === country)?.text || country.toUpperCase();
+    exitHint.textContent = country === 'any' ? 'Tor picks exits anywhere again.' : `Exits now in ${name}. Reload pages to use them.`;
     exitHint.className = 'hint ok';
   } catch (e) {
     const d = describe(e);
@@ -373,6 +382,7 @@ async function setExit(country) {
     exitHint.title = e.detail || '';
     exitSelect.value = S.exitCountry; // nothing changed
   } finally {
+    exitBusy = false;
     exitSelect.disabled = false;
     paintIP();
     paintSettings();
