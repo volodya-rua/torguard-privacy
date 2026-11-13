@@ -602,7 +602,9 @@ async function runLeakTest() {
     proxied = levelOfControl === 'controlled_by_this_extension' && ['pac_script', 'fixed_servers'].includes(value.mode);
     prediction = (await chrome.privacy.network.networkPredictionEnabled.get({ incognito: S.incognitoOnly })).value;
   } catch {}
-  add(proxied && prediction === false ? 'pass' : 'fail', 'DNS goes through Tor',
+  // the proxy being on somewhere doesnt mean THIS page uses it (Off site, normal window in incognito only mode)
+  if (!usingTor) add('fail', 'DNS goes through Tor', 'Names are looked up by your normal DNS, so your ISP sees which sites you visit');
+  else add(proxied && prediction === false ? 'pass' : 'fail', 'DNS goes through Tor',
     proxied ? 'Names are looked up by the Tor exit, nothing is prefetched outside Tor' : 'The Tor proxy isn\'t active');
 
   let page = null;
@@ -612,7 +614,8 @@ async function runLeakTest() {
   if (!page) {
     add('na', 'WebRTC and fingerprint', 'Can\'t test on this kind of page');
   } else {
-    add(page.rtcLeaks.length ? 'fail' : 'pass', 'WebRTC can\'t leak your IP',
+    if (!usingTor) add('na', 'WebRTC', 'Doesn\'t matter here, the site already sees your real IP');
+    else add(page.rtcLeaks.length ? 'fail' : 'pass', 'WebRTC can\'t leak your IP',
       page.rtcLeaks.length ? `Exposed: ${page.rtcLeaks.join(', ')}` : page.rtcBlocked ? 'WebRTC isn\'t available here' : 'No direct connections offered');
     if (level === 'low' || level === 'off') {
       add('na', 'Fingerprint', `Left alone on ${level === 'low' ? 'Low' : 'Off'}, on purpose`);
@@ -632,12 +635,13 @@ async function runLeakTest() {
   }
 
   const proto = tab?.url ? new URL(tab.url).protocol : '';
-  if (proto === 'https:') add('pass', 'Page is encrypted (HTTPS)', 'Tor exit relays can\'t read or change it');
+  if (proto === 'https:') add('pass', 'Page is encrypted (HTTPS)', usingTor ? 'Tor exit relays can\'t read or change it' : 'Your wifi and ISP can\'t read or change it, but they see the site name');
   else if (proto === 'http:') add('fail', 'Page is not encrypted', S.forceHttps ? 'This site has no HTTPS version' : 'Turn on Force HTTPS');
   else add('na', 'HTTPS', 'Not a website');
 
   const trackers = await countTrackers();
   if (!S.blockTrackers) add('na', 'Trackers', 'Tracker blocking is off');
+  else if (!usingTor) add('fail', 'Trackers blocked', level === 'off' ? 'Nothing is blocked on Off sites, on purpose' : 'Only blocked on pages that go through Tor');
   else if (trackers === null) add('na', 'Trackers', 'Couldn\'t count right now');
   else add('pass', 'Trackers blocked', trackers ? `${trackers} blocked on this page` : 'None found on this page');
 
